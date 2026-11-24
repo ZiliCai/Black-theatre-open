@@ -56,3 +56,13 @@ test('acceptance is complete only after local bytes match the remote checksum', 
   assert.equal(await collect(state, 0, tmp), name);
   await assert.rejects(collect({ ...state, file: '../etc/passwd' }, port, tmp), /信息无效/);
 });
+
+test('the download list covers every weight referenced by both published Wenwu graphs', async () => {
+  for (const id of ['minimax-h3-wenwu', 'minimax-h3-wenwu-cont']) {
+    const graph = JSON.parse(await fs.readFile(path.join(root, 'workflow-templates', id, 'workflow.api.json'), 'utf8'));
+    const weights = Object.values(graph).flatMap((node) => Object.values(node.inputs))
+      .filter((value) => typeof value === 'string' && /\.(safetensors|gguf|pt|pth|ckpt|bin)$/i.test(value));
+    const planned = catalog.workflows[id].map((file) => path.posix.basename(file));
+    assert.deepEqual([...new Set(weights)].sort(), [...planned].sort());
+  }
+});

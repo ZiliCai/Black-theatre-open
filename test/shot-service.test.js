@@ -28,7 +28,7 @@ const DOC = [
   '',
 ].join('\n');
 
-function harness({ trashFails = false } = {}) {
+function harness({ trashFails = false, getDefaultTemplate } = {}) {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'shot-svc-')), '宣传视频');
   const docsDir = path.join(dir, 'Minimax剧本');
   const outputDir = path.join(dir, 'output');
@@ -42,6 +42,7 @@ function harness({ trashFails = false } = {}) {
   const service = createShotService({
     getProject: () => project,
     templatesDir: TEMPLATES,
+    getDefaultTemplate,
     queue: { enqueue: (jobs) => queued.push(...jobs), busy: () => false },
     trash: async (abs) => {
       if (trashFails) throw new Error('文件正被占用');
@@ -62,6 +63,14 @@ function harness({ trashFails = false } = {}) {
   };
   return { service, store, queued, trashed, finished, dir, docsDir, outputDir, setProject: (p) => { project = p; } };
 }
+
+test('a new shot uses the verified remote workflow and preserves an existing draft choice', () => {
+  const { service } = harness({ getDefaultTemplate: () => 'minimax-h3-hybrid' });
+  const first = service.detail('MOTION-E01-01').draft;
+  assert.equal(first.templateId, 'minimax-h3-hybrid');
+  service.saveDraft('MOTION-E01-01', { ...first, templateId: 'minimax-h3-wenwu-cont' });
+  assert.equal(service.detail('MOTION-E01-01').draft.templateId, 'minimax-h3-wenwu-cont');
+});
 
 test('episodes lists script shots then manual and orphan', () => {
   const h = harness();

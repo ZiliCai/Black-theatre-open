@@ -38,12 +38,13 @@ const { listScriptShots, importScriptShot, reviseScriptShotPrompt } = require('.
 const projects = require('./src/projects');
 const { migrateLegacyUserData } = require('./src/legacy-migrate');
 const { createGenerationQueue } = require('./src/generation-queue');
-const { createShotService } = require('./src/shot-service');
+const { createShotService, DEFAULT_TEMPLATE } = require('./src/shot-service');
 const { createUpscaleService, createUpscaleStore } = require('./src/upscale');
 const { createTakeStore } = require('./src/take-store');
 const { createAssetService } = require('./src/asset-service');
 const { createAssetStore } = require('./src/asset-store');
 const autodl = require('./src/autodl-setup');
+const selfcheck = require('./src/setup-selfcheck');
 const cloud = require('./src/cloud-onboarding');
 const setupPreviews = () => path.join(app.getPath('userData'), 'autodl-previews');
 const { createRemoteTarget, testServer } = require('./src/remote-target');
@@ -675,7 +676,7 @@ function registerIpc() {
       const server = normalizeServer({ id: 'srv-' + crypto.randomUUID(), name: 'AutoDL · ' + endpoint.host,
         comfyPort: 8188, ...existing, ...loginServer });
       const servers = [...config.servers.filter((s) => s.id !== server.id), server];
-      const setupWatch = { id: server.id, profile, upscale: false };
+      const setupWatch = { id: server.id, profile, upscale: false, pending: true, requiresChat: true, endpoint: selfcheck.endpoint(server) };
       setLlmSecret(key);
       saveRemote({ servers, target: server.id, llm: { ...config.llm, ...llm }, cloudWelcome: 'pending' });
       welcomeMessage = '正在上传安装包并启动云端自检…';
@@ -695,20 +696,43 @@ function registerIpc() {
       if (busy) return busy;
       if (welcomeMessage) throw new Error('首次配置正在启动，请稍候。');
       await autodl.launch(server, __dirname, { profile, upscale: upscale === true });
-      applyConfig({ setupWatch: { id, profile, upscale: upscale === true } });
+      applyConfig({ setupWatch: { id, profile, upscale: upscale === true, pending: true, endpoint: selfcheck.endpoint(server) } });
       saveConfig(configFile, config);
       return { ok: true };
     } catch (error) { return { ok: false, message: error.message }; }
   });
-  ipcMain.handle('autodl:status', async (_e, { id } = {}) => {
-    const server = selectedServer(id);
+  const reads = new Map();
+  const checking = new Map();
+  const watchFor = (server) => {
+    const w = config.setupWatch;
+    return w?.id === server.id && (!w.endpoint || w.endpoint === selfcheck.endpoint(server)) ? w : null;
+  };
+  async function setupStatus(server, retest) {
+    const id = server.id;
+    const scope = selfcheck.endpoint(server);
+    const watch = watchFor(server);
+    const activeCheck = checking.get(scope);
+    if (activeCheck && activeCheck.watch === watch) return activeCheck.view;
     const sameServer = () => {
       const now = remoteTarget.server();
       return now && ['id', 'user', 'host', 'port', 'comfyPort'].every((k) => now[k] === server[k]);
     };
-    const s = await autodl.status(server);
+    let s;
+    try { s = await autodl.status(server); }
+    catch (e) {
+      const cached = config.setupReports?.[id];
+      if (retest || watch?.pending || cached?.scope !== scope) throw e;
+      return { status: 'attention', phase: 'selfcheck', historical: true, video: cached.preview.endsWith('.mp4'), report: cached,
+        message: '当前无法连接实例。以下为上次自检记录，开机并连接后可以重新自检。' };
+    }
     const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, video: s.video };
-    if (s.status !== 'ready') return view;
+    if (s.status !== 'ready') {
+      if (s.status === 'failed' && watch?.pending && config.setupWatch === watch) {
+        applyConfig({ setupWatch: { ...watch, pending: false } });
+        saveConfig(configFile, config);
+      }
+      return view;
+    }
     if (!sameServer()) throw new Error('出片服务器已切换');
     let preview;
     try { preview = await autodl.collect(s, remoteTarget.port(), setupPreviews()); }
@@ -724,12 +748,47 @@ function registerIpc() {
     if (startCommand !== current.startCommand || JSON.stringify(modelSwaps) !== JSON.stringify(current.modelSwaps)) {
       saveRemote({ servers: config.servers.map((p) => p.id === id ? { ...p, startCommand, modelSwaps } : p) });
     }
-    if (config.cloudWelcome === 'watch' && config.setupWatch?.id === id) {
-      applyConfig({ cloudWelcome: 'complete' });
-      saveConfig(configFile, config);
+    const checkingView = { ...view, phase: 'selfcheck', preview, message: '正在从本机检查 GPU 服务和文本生成功能…' };
+    const cached = config.setupReports?.[id];
+    if (checking.has(scope) || watchFor(server) !== watch) return checkingView;
+    if (!retest && cached?.scope === scope && cached.run === s.run) {
+      return { ...view, preview, phase: 'selfcheck', report: cached, status: cached.ok ? 'done' : 'attention',
+        message: cached.ok ? '自检通过，可以开始使用已验证的功能。' : '配置已安装，部分功能需要处理。修复后可单独重新自检。' };
     }
-    return { ...view, status: 'done', message: '配置完成，验收文件已取回本机并通过校验。', gpu: s.gpu, space: s.space, preview };
-  });
+    // Keep the test alive when the user leaves settings. Concurrent polls share one chat request.
+    const required = watch?.requiresChat ?? (watch && config.cloudWelcome === 'watch');
+    checking.set(scope, { watch, view: checkingView });
+    const task = selfcheck.run({ state: s, preview, port: remoteTarget.port(), llm: { ...config.llm },
+      getKey: llmKey, requiresChat: required }).then((report) => {
+      if (watchFor(server) !== watch || !config.servers.some((p) => selfcheck.endpoint(p) === scope)) return;
+      const completeWelcome = report.ok && watch && sameServer() && config.cloudWelcome === 'watch';
+      applyConfig({ setupReports: { ...config.setupReports, [id]: { ...report, scope, preview, videoTemplate: s.videoTemplate } },
+        ...(watch ? { setupWatch: { ...watch, requiresChat: !!required, pending: false } } : {}),
+        ...(completeWelcome ? { cloudWelcome: 'complete' } : {}) });
+      saveConfig(configFile, config);
+      if (sameServer()) send('notice', { message: report.ok ? '云端配置自检通过，报告已保存到「远程 GPU」。' : '云端配置自检有项目需要处理，请打开「远程 GPU」查看。' });
+    }).finally(() => checking.delete(scope));
+    task.catch((error) => console.error('保存配置自检结果失败', error.message));
+    return checkingView;
+  }
+  function readSetup(id, retest = false) {
+    const server = selectedServer(id);
+    const key = selfcheck.endpoint(server);
+    const existing = reads.get(key);
+    if (existing) return retest ? existing.then(() => readSetup(id, true)) : existing;
+    const task = setupStatus(server, retest).finally(() => reads.delete(key));
+    reads.set(key, task);
+    return task;
+  }
+  ipcMain.handle('autodl:status', (_e, { id, retest } = {}) => readSetup(id, retest === true));
+  const monitor = setInterval(() => {
+    const server = remoteTarget.server();
+    const watch = server && watchFor(server);
+    if (watch && (watch.pending ?? (config.cloudWelcome === 'watch'))) {
+      readSetup(server.id).catch(() => {}); // disconnected or switched: resume on the next tick
+    }
+  }, 10000);
+  app.once('will-quit', () => clearInterval(monitor));
   ipcMain.handle('remote:get', () => remotePayload());
   ipcMain.handle('remote:save', (_e, raw) => {
     const server = normalizeServer(raw || {});
@@ -750,7 +809,9 @@ function registerIpc() {
       const busy = queueBlocksSwitch();
       if (busy) return busy;
     }
-    return saveRemote({ servers: config.servers.filter((s) => s.id !== id), target: config.target === id ? 'local' : config.target });
+    const reports = { ...config.setupReports };
+    delete reports[id];
+    return saveRemote({ setupReports: reports, servers: config.servers.filter((s) => s.id !== id), target: config.target === id ? 'local' : config.target });
   });
   ipcMain.handle('remote:use', (_e, { id } = {}) => {
     const target = id && config.servers.some((s) => s.id === id) ? id : 'local';
@@ -1373,6 +1434,11 @@ if (!app.requestSingleInstanceLock()) {
       queue: generationQueue,
       trash: SMOKE ? (p) => fs.promises.rm(p) : (p) => shell.trashItem(p),
       getTargetId: () => config.target || 'local',
+      getDefaultTemplate: () => {
+        const server = remoteTarget.server();
+        const report = server && config.setupReports?.[server.id];
+        return report?.videoTemplate === 'minimax-h3-hybrid' && report.scope === selfcheck.endpoint(server) ? report.videoTemplate : DEFAULT_TEMPLATE;
+      },
       // the script's 输入参考图 become each card's main picture
       getCardMains: () => (assetService ? assetService.mains() : {}),
       getBlocking: (shotId) => (sceneService ? sceneService.factsFor(shotId) : null),

@@ -13,8 +13,9 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
   const [state, setState] = useState<SetupState | null>(null);
   const [error, setError] = useState('');
   const [round, setRound] = useState(0);
+  const [retesting, setRetesting] = useState(false);
   useEffect(() => {
-    if (!watch || uploading) return;
+    if (!watch || uploading || retesting) return;
     let live = true;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
@@ -23,7 +24,9 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
         if (!live) return;
         setState(next);
         setError('');
-        if (['done', 'failed', 'idle'].includes(next.status)) return;
+        if (['done', 'attention', 'failed', 'idle'].includes(next.status)) return;
+        timer = setTimeout(poll, next.phase === 'selfcheck' ? 2000 : 8000);
+        return;
       } catch (e) {
         if (!live) return;
         setError(String(e instanceof Error ? e.message : e));
@@ -32,7 +35,15 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
     }
     void poll();
     return () => { live = false; clearTimeout(timer); };
-  }, [server.id, watch, uploading, round]);
+  }, [server.id, watch, uploading, retesting, round]);
+
+  async function retest() {
+    setRetesting(true);
+    setError('');
+    try { setState(await api.autodlStatus({ id: server.id, retest: true })); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+    finally { setRetesting(false); setRound((n) => n + 1); }
+  }
 
   async function install() {
     setUploading(true);
@@ -52,17 +63,18 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
       setRound((n) => n + 1);
     }
   }
-  const busy = uploading || (watch && !state && !error) || state?.status === 'running' || state?.status === 'ready';
+  const busy = retesting || uploading || (watch && !state && !error) || state?.status === 'running' || state?.status === 'ready';
   return <section className="card">
     <div className="welcome-heading"><h3>AutoDL 一键配置</h3><span className="muted">{server.name}</span></div>
     {state && !uploading && <SetupProgress state={state} offline={!!error} />}
     {watch && !state && !error && !uploading && <div role="status">正在读取云端进度…<progress aria-label="正在读取云端进度" /></div>}
-    <p className="muted">环境和模型安装到实例的数据盘。云端会实际生成验收素材，选择视频工作流时还会取回约 4 秒的短片。实例按平台规则计费，用完请到 AutoDL 关机。</p>
+    {state?.report && !uploading && <div className="actions"><Button id="btn-setup-retest" disabled={busy} variant={state.status === 'attention' ? 'primary' : 'default'} onClick={retest}>{retesting ? '正在复查…' : '重新自检'}</Button></div>}
+    <p className="muted">环境和模型安装到实例的数据盘。云端会实际生成验收素材，选择视频工作流时还会取回约 4 秒的短片。已配置 DeepSeek 时，自检会发送一次简短测试请求，按 API 用量计费。实例用完请到 AutoDL 关机。</p>
     <ProfileSelect value={profile} disabled={busy} change={setProfile} />
     <label><input type="checkbox" checked={upscale} disabled={busy} onChange={(e) => setUpscale(e.target.checked)} /> 同时安装 SeedVR2 超分</label>
     <div className="actions">
       <Button id="btn-autodl-setup" variant="primary" disabled={busy} onClick={install}>
-        {uploading ? '正在上传安装包…' : busy ? '配置进行中…' : state?.status === 'failed' ? '重试配置并验收' : '配置并验收'}
+        {uploading ? '正在上传安装包…' : busy ? '配置进行中…' : state?.status === 'failed' ? '重试配置并验收' : state?.report ? '重新配置并验收' : '配置并验收'}
       </Button>
       {!busy && <Button size="sm" onClick={() => { setWatch(true); setRound((n) => n + 1); }}>查看云端进度</Button>}
     </div>

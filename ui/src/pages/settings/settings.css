@@ -80,3 +80,10 @@
 .setup-progress { border-top: 1px solid var(--line); padding-top: var(--s4); font-variant-numeric: tabular-nums; }
 .shutdown-plan { padding: var(--s3); background: var(--bg); border-radius: var(--r2); }
 .shutdown-plan input { max-width: 9em; }
+
+.check-report ul { list-style: none; padding: 0; margin: var(--s2) 0; }
+.check-report li { display: flex; align-items: baseline; gap: var(--s3); padding: var(--s2) 0; border-bottom: 1px solid var(--line); }
+.check-report li p { margin: 3px 0 0; }
+.check-result { min-width: 3em; color: var(--sub); }
+.check-result.pass { color: var(--good); }
+.check-result.fail { color: var(--bad); }

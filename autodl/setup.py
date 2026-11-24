@@ -130,6 +130,7 @@ def execute(root, port, state):
     recipe = json.loads((BUNDLE / 'recipe.json').read_text())
     catalog = json.loads((BUNDLE / 'autodl/models.json').read_text())
     state['video'] = bool(recipe.get('video'))
+    state['videoTemplate'] = next((w for w in recipe['workflows'] if w.startswith('minimax-h3-')), None)
     step('check', '正在检查 GPU、驱动和数据盘')
     gpu = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,driver_version,compute_cap',
                                    '--format=csv,noheader,nounits', '--id=0'], text=True).strip()

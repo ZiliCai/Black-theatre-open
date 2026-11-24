@@ -764,6 +764,16 @@ async function runSmoke(h) {
     const imageBytes = fs.readFileSync(path.join(FIXTURES, 'media', 'sample.png'));
     let ready = false;
     let launches = 0;
+    let chatChecks = 0;
+    const selfcheck = require('./src/setup-selfcheck');
+    const runSelfcheck = selfcheck.run;
+    // Real local Comfy HTTP endpoints and an isolated reply in place of the paid chat API.
+    selfcheck.run = (options) => runSelfcheck({ ...options, probeGpu: () => selfcheck.checkGpu(comfyPort),
+      probeChat: (llm, key) => selfcheck.checkChat(llm, key, async () => {
+        check.equal(key, sampleKey);
+        if (++chatChecks === 1) throw new Error('LLM API HTTP 402');
+        return { content: 'OK' };
+      }) });
     cloud.verifyDeepSeek = async (key) => { check.equal(key, sampleKey); return cloud.DEEPSEEK; };
     cloud.connectInstance = async (server, password) => {
       check.equal(password, samplePassword);
@@ -799,8 +809,20 @@ async function runSmoke(h) {
     const previewDir = path.join(h.app.getPath('userData'), 'autodl-previews');
     fs.mkdirSync(previewDir, { recursive: true });
     fs.writeFileSync(path.join(previewDir, runId + '.png'), imageBytes);
+    await click('#nav-script');
     ready = true;
-    await waitFor("document.querySelector('.setup-progress')?.textContent.includes('已完成全部阶段') && !!document.querySelector('#tab-remote img')", 13000, 'verified local sample completes onboarding');
+    await waitFor("window.launcher.getConfig().then(({config}) => config.setupReports?.[config.target]?.ok === false)", 20000, 'default self-check runs away from settings');
+    check.equal(h.getConfig().cloudWelcome, 'watch');
+    await click('#nav-settings');
+    await click('#set-tab-remote');
+    await waitFor("document.querySelector('.check-report')?.textContent.includes('余额不足')", 6000, 'partial readiness and repair instructions');
+    await reload();
+    await waitFor("!!document.getElementById('btn-setup-retest')", 6000, 'stored report after reopening');
+    check.equal(chatChecks, 1);
+    await click('#btn-setup-retest');
+    await waitFor("document.querySelector('.setup-progress')?.textContent.includes('已完成全部阶段') && !!document.querySelector('#tab-remote img')", 13000, 'retest succeeds without reinstalling');
+    check.equal(chatChecks, 2);
+    await shot('cloud-selfcheck');
     check.equal(h.getConfig().cloudWelcome, 'complete');
     check.equal(launches, 1);
     report('SMOKE OK');

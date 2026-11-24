@@ -74,7 +74,7 @@ export function CloudWelcome({ onRemote, onSkip }: { onRemote: () => void; onSki
     </section>
     <section className="card">
       <ProfileSelect value={profile} disabled={busy} change={setProfile} />
-      <p className="muted">点击后会在已租用的实例上安装环境和模型，再生成验收素材。下载期间实例持续计费。</p>
+      <p className="muted">点击后会在已租用的实例上安装环境和模型，生成验收素材，并向 DeepSeek 发送一次简短测试请求。GPU 运行和 API 调用分别按用量计费。</p>
       <div className="actions"><Button type="submit" variant="primary" disabled={busy} id="welcome-install">{busy ? '正在配置…' : '一键配置并自检'}</Button>
         <Button disabled={busy} onClick={async () => { if (await api.cloudSkip()) onSkip(); }}>稍后配置</Button>
         {!busy && watching && <Button onClick={onRemote}>查看实例配置进度</Button>}</div>

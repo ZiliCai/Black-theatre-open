@@ -86,6 +86,7 @@ async function completeLlm(config, apiKey, messages) {
       messages: chatMessages(checked.model, messages),
       temperature: messages.temperature,
       max_tokens: messages.maxTokens,
+      ...(messages.thinking ? { thinking: messages.thinking } : {}),
     },
     ...(messages.timeoutMs ? { timeoutMs: messages.timeoutMs } : {}),
   });

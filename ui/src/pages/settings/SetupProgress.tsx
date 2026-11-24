@@ -10,7 +10,7 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
   if (state.status === 'idle') return null;
   const steps = [
     ['check', '检查实例'], ['environment', '安装环境与模型'], ['nodes', '检查工作流'],
-    ['image', '生成验收图'], ...(state.video === false ? [] : [['video', '生成验收视频']]), ['transfer', '取回并校验'],
+    ['image', '生成验收图'], ...(state.video === false ? [] : [['video', '生成验收视频']]), ['transfer', '取回并校验'], ['selfcheck', '使用前自检'],
   ];
   const completed = state.status === 'done';
   const stage = steps.findIndex(([id]) => id === (state.phase === 'models' ? 'environment' : state.phase));
@@ -23,7 +23,7 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
   const estimate = seconds === null ? null : now + seconds * 1000;
   const minutes = Number(reserve);
   return <div className="setup-progress">
-    <div className="welcome-heading"><strong>{completed ? '配置与验收完成' : stage < 0 ? '配置进度' : steps[stage][1]}</strong>
+    <div className="welcome-heading"><strong>{state.historical ? '上次自检结果' : completed ? '自检通过' : state.status === 'attention' ? '自检需要处理' : stage < 0 ? '配置进度' : steps[stage][1]}</strong>
       {(completed || stage >= 0) && <span className="muted">{completed ? '已完成全部阶段' : '阶段 ' + (stage + 1) + ' / ' + steps.length}</span>}</div>
     <progress aria-label="配置阶段完成进度" max={steps.length} value={completed ? steps.length : stage < 0 ? undefined : stage} />
     {percent !== null && d && <div>
@@ -32,14 +32,22 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
       <p className="muted">{gib(d.saved)} / {gib(d.total)} GiB
         {seconds !== null && <> · {(d.rate / 2 ** 20).toFixed(1)} MiB/s · 约剩 {Math.ceil(seconds / 60)} 分钟</>}</p>
     </div>}
-    <div className={state.status === 'failed' ? 'errors' : 'note-box'} role="status">{state.message}</div>
+    <div className={state.status === 'failed' || state.status === 'attention' ? 'errors' : 'note-box'} role="status">{state.message}</div>
+    {state.report && <section aria-label="配置自检报告" className="check-report">
+      <div className="welcome-heading"><strong>配置自检报告</strong><span className="muted">{clock(state.report.at)}</span></div>
+      <ul>{state.report.checks.map((item) => <li key={item.id}>
+        <span className={'check-result ' + item.status}>{item.status === 'pass' ? '通过' : item.status === 'fail' ? '需处理' : '跳过'}</span>
+        <div><strong>{item.label}</strong><p className="muted">{item.detail}</p></div>
+      </li>)}</ul>
+    </section>}
     {estimate !== null && <div className="shutdown-plan">
       <p>预计下载完成于 {clock(estimate)}（本机时间）</p>
       <Field label="为剩余安装和验收预留（分钟）"><TextInput type="number" min="0" max="1440" step="1"
         value={reserve} onChange={(e) => setReserve(e.target.value)} /></Field>
       {reserve && Number.isInteger(minutes) && minutes >= 0 && minutes <= 1440 && <p>关机预设参考时间：{clock(estimate + minutes * 60000)}（含预留）。请在控制台确认。</p>}
     </div>}
-    <p className="muted">{completed ? '验收素材已保存到本机。如果这台实例没有其他任务，现在可以关机。' :
+    <p className="muted">{completed ? '选择或新建剧本项目后，可到「素材」出图。' + (state.video ? '在「镜头」可使用所选视频工作流出片。' : '') + '使用云端生成时请保持实例开机。' :
+      state.status === 'attention' ? '修复提示中的问题后，点击「重新自检」即可复查。' :
       offline ? '正在重新连接。恢复进度更新后会重新估算下载时间。' :
       state.status === 'failed' ? '云端配置已中断，可以重试或到控制台关机。' :
       '下载估时随网速变化。环境安装和实际生成另需时间，设置定时关机时请为验收留出余量。'}</p>

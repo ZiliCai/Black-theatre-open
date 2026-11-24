@@ -26,7 +26,7 @@ const episodeOf = (shotId) => {
 
 // getBlocking(shotId): what the shot's camera sees in a whitebox scene's blocking ({ facts }), or null
 // getCards(): the project's cards for a new shot to pick from ([{ code, kind, name, description, main }])
-function createShotService({ getProject, templatesDir, queue, trash, getTargetId = () => 'local', getCardMains = () => ({}), getBlocking = () => null, getCards = () => [] }) {
+function createShotService({ getProject, templatesDir, queue, trash, getTargetId = () => 'local', getDefaultTemplate = () => DEFAULT_TEMPLATE, getCardMains = () => ({}), getBlocking = () => null, getCards = () => [] }) {
   const factsOf = (shotId) => {
     try { const b = getBlocking(shotId); return b && b.facts && b.facts.camera ? b.facts : null; } catch { return null; }
   };
@@ -166,7 +166,7 @@ function createShotService({ getProject, templatesDir, queue, trash, getTargetId
     let templateId = previous && previous.templateId;
     let values = previous ? { ...previous.values } : null;
     if (!templateId || !templateList().some((t) => t.dirName === templateId && t.compatible)) {
-      templateId = DEFAULT_TEMPLATE;
+      templateId = getDefaultTemplate();
       values = null;
     }
     if (!values) values = { ...templateForm(loadById(templateId)).defaults };
@@ -526,7 +526,7 @@ function createShotService({ getProject, templatesDir, queue, trash, getTargetId
       const previousDraft = prev ? store.readShot(prev.id).draft : null;
       let maxReferences = 6;
       try {
-        maxReferences = templateForm(loadById((previousDraft && previousDraft.templateId) || DEFAULT_TEMPLATE)).limits.maxReferences || 6;
+        maxReferences = templateForm(loadById((previousDraft && previousDraft.templateId) || getDefaultTemplate())).limits.maxReferences || 6;
       } catch { /* the usual six */ }
       const cards = (getCards() || []).filter((c) => c && c.code);
       return { ok: true, previous: brief(prev), next: brief(next), cards, maxReferences };
