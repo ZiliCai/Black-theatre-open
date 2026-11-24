@@ -2,7 +2,7 @@
 
 用 AI 做短剧的 Windows 桌面软件：写剧本、做人物和场景素材、按镜头出视频、挑片、连起来看。出片用的是 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 加 MiniMax H3 视频模型，可以在本机显卡上跑，也可以放到租的云 GPU（比如 AutoDL）上跑。
 
-> Windows 桌面端目前从源码启动。首次启动时可通过向导连接 AutoDL 和 DeepSeek，一键安装云端环境和模型。进度页显示模型下载估时，并在配置完成后展示实际生成的验收素材。
+> Windows x64 提供独立安装包，内置桌面运行时和 SSH 客户端。首次启动会打开 AutoDL 和 DeepSeek 配置向导。
 
 ## 能做什么
 
@@ -22,22 +22,19 @@
   - **本机**：NVIDIA 显卡，建议 16GB 显存以上，硬盘留 100GB；
   - **远程**：一台租的云 GPU（建议 RTX 4090 24GB），本机只运行软件。
 - 本机出片需要 [ComfyUI 便携版](https://github.com/comfyanonymous/ComfyUI/releases) v0.37.0
-- [Node.js](https://nodejs.org/) 20 以上（从源码运行时需要）
+- 从源码运行或构建安装包的开发者需要 Node.js 22.12 或更高版本。
 
 ## 安装
 
-使用 AutoDL 时，只需在 Windows 完成第 3 步，再按[云端配置说明](docs/AutoDL配置.md)操作。本机出片按下面三步安装。
+### Windows 独立安装包
 
-1. **ComfyUI 插件**：把 [`comfyui-plugins/`](comfyui-plugins/) 下的插件文件夹复制到 ComfyUI 的 `custom_nodes/`，详见那里的说明。
-2. **模型**：按 [docs/模型下载.md](docs/模型下载.md) 下载，放到 ComfyUI 的 `models/` 下对应的位置。
-3. **软件**：
+双击 `BlackBox-Theater-Setup-2.1.0-x64.exe`。安装程序会安装到当前用户，并创建桌面和开始菜单快捷方式。安装结束后软件自动打开。新用户会看到「首次云端配置」，可在向导里连接 AutoDL 和 DeepSeek，详见[云端配置说明](docs/AutoDL配置.md)。选择「稍后配置」后，可从「设置 → 首次云端配置」再次打开向导。
 
-   ```bash
-   npm install
-   npm run build
-   ```
+云端模型在一键配置时下载到自己的 GPU 实例。希望在本机出片的用户，可在向导里选择「稍后配置」，准备 ComfyUI 便携版，按 [插件说明](comfyui-plugins/) 和 [模型说明](docs/模型下载.md) 安装，然后在「设置 → 常规」选择便携版文件夹。
 
-   之后双击 `启动器.bat` 打开。本机出片时，在 设置 → 常规 里选择 ComfyUI 便携版文件夹。
+### 从源码运行或制作安装包
+
+开发者在源码目录执行 `npm ci`。用 `npm start` 构建并启动软件。在 Windows x64 执行 `npm run dist:win` 可生成独立安装包，文件保存在 `release/`。首次构建需要联网获取打包工具和经过 SHA-256 校验的 OpenSSH 客户端。
 
 ## 工作流
 

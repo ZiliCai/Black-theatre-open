@@ -2,7 +2,7 @@
 // reconnected after it drops. Everything that touches the system is injected (see test/remote-tunnel.test.js).
 const net = require('node:net');
 const { spawn: realSpawn } = require('node:child_process');
-const { tunnelArgs, commandArgs, explainSsh } = require('./remote-servers');
+const { sshExecutable, tunnelArgs, commandArgs, explainSsh } = require('./remote-servers');
 
 const RETRY_MS = [2000, 5000, 10000, 30000];
 const OPEN_WAIT_MS = 20000;
@@ -73,7 +73,7 @@ function createTunnel({
     let exited = false;
     let proc;
     try {
-      proc = spawn('ssh', tunnelArgs(server, port), { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      proc = spawn(sshExecutable, tunnelArgs(server, port), { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
     } catch (e) {
       stderr = e.message;
       exited = true;
@@ -163,7 +163,7 @@ function runRemote(server, command, { spawn = realSpawn, timeoutMs = 30000, inpu
     let stderr = '';
     let proc;
     try {
-      proc = spawn('ssh', commandArgs(server, command), { windowsHide: true, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+      proc = spawn(sshExecutable, commandArgs(server, command), { windowsHide: true, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     } catch (e) {
       resolve({ ok: false, code: null, stdout, stderr: e.message, ...explainSsh(e.message) });
       return;

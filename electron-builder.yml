@@ -1,0 +1,40 @@
+appId: com.blackboxtheater.desktop
+productName: 黑箱剧场
+directories:
+  output: release
+files:
+  - main.js
+  - preload.js
+  - src/**/*
+  - renderer/*.js
+  - renderer/assets/app-icon.png
+  - ui/dist/**/*
+  - LICENSE
+extraResources:
+  - from: workflow-templates
+    to: workflow-templates
+  - from: autodl
+    to: autodl
+    filter: ["*.py", "models.json"]
+  - from: comfyui-plugins
+    to: comfyui-plugins
+    filter: ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!**/.git/**", "!**/.DS_Store"]
+  - from: .pack-cache/OpenSSH-Win64
+    to: openssh
+    filter: ["ssh.exe", "libcrypto.dll", "ssh-sk-helper.exe", "ssh-pkcs11-helper.exe", "LICENSE.txt", "NOTICE.txt"]
+  - from: ui/src/assets/fonts/OFL.txt
+    to: licenses/NotoSansSC-OFL.txt
+win:
+  icon: renderer/assets/app.ico
+  executableName: BlackBoxTheater
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  artifactName: BlackBox-Theater-Setup-${version}-${arch}.${ext}
+  oneClick: true
+  perMachine: false
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  shortcutName: 黑箱剧场 BlackBox Theater
+  installerLanguages: [zh_CN]

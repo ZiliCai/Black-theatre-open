@@ -2,6 +2,10 @@
 // Plain Node, no Electron. Passwords are never stored or typed: ssh runs with BatchMode and the user's own keys.
 const path = require('node:path');
 
+// The Windows distribution carries the client alongside its app archive; source runs use the system ssh.
+const sshExecutable = process.platform === 'win32' && process.resourcesPath && !process.defaultApp
+  ? path.join(process.resourcesPath, 'openssh', 'ssh.exe') : 'ssh';
+
 const NAME_PART = /^[A-Za-z0-9._-]+$/;
 // a host name or address that ssh cannot mistake for an option
 const HOST = /^[A-Za-z0-9][A-Za-z0-9.:-]*$/;
@@ -92,4 +96,4 @@ function explainSsh(stderr) {
   return { kind: 'error', message: last ? `SSH 出错:${last}` : 'SSH 连接断开了' };
 }
 
-module.exports = { normalizeServer, validateServer, activeServer, sshBase, tunnelArgs, commandArgs, explainSsh };
+module.exports = { sshExecutable, normalizeServer, validateServer, activeServer, sshBase, tunnelArgs, commandArgs, explainSsh };

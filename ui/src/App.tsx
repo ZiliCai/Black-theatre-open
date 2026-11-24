@@ -41,6 +41,7 @@ const readPage = (): PageId => {
 };
 
 export function App() {
+  const [initializing, setInitializing] = useState(true);
   const [page, setPage] = useState<PageId>(readPage);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [status, setStatus] = useState<Status | null>(null);
@@ -69,7 +70,7 @@ export function App() {
         setPage('settings');
         setSettingsTab('general');
       }
-    });
+    }).finally(() => setInitializing(false));
     const offs = [
       api.onStatus(setStatus),
       api.onQueue(setQueue),
@@ -98,6 +99,7 @@ export function App() {
     if (crumb) setCrumbSlot(crumb);
   }, []);
 
+  if (initializing) return null;
   return (
     <AppContext.Provider value={state}>
       <div className="app">

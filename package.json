@@ -7,6 +7,7 @@
   "main": "main.js",
   "scripts": {
     "build": "vite build --config ui/vite.config.mts",
+    "dist:win": "npm run build && node scripts/prepare-win-ssh.js && electron-builder --win nsis --x64 --publish never",
     "dev:ui": "vite --config ui/vite.config.mts",
     "start": "npm run build && electron .",
     "smoke": "npm run build && electron . --smoke",
@@ -20,6 +21,7 @@
     "@types/three": "0.160.0",
     "@vitejs/plugin-react": "4.3.3",
     "electron": "43.7.7",
+    "electron-builder": "26.18.0",
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "three": "0.160.0",

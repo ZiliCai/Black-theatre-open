@@ -56,7 +56,8 @@ const fmt = require('./renderer/format');
 // corsEnabled: the play-through reads a shot's sound through Web Audio, which loads the video in CORS mode
 protocol.registerSchemesAsPrivileged([{ scheme: 'media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } }]);
 
-const SMOKE = process.argv.includes('--smoke');
+const workflowRoot = app.isPackaged ? process.resourcesPath : __dirname;
+const SMOKE = !app.isPackaged && process.argv.includes('--smoke');
 // test-only code is loaded only for --smoke, so a mistake in it can never stop a normal start
 const runSmoke = SMOKE ? require('./smoke').runSmoke : null;
 const STATUS_EVERY_MS = 3000;
@@ -680,7 +681,7 @@ function registerIpc() {
       setLlmSecret(key);
       saveRemote({ servers, target: server.id, llm: { ...config.llm, ...llm }, cloudWelcome: 'pending' });
       welcomeMessage = '正在上传安装包并启动云端自检…';
-      await autodl.launch(server, __dirname, setupWatch);
+      await autodl.launch(server, workflowRoot, setupWatch);
       // An older run on the same port must not complete this onboarding if the upload fails.
       applyConfig({ setupWatch, cloudWelcome: 'watch',
         ...(profile === 'image' || config.target !== server.id ? {} : { workflowTemplate: profile === 'wenwu' ? 'minimax-h3-wenwu-cont' : 'minimax-h3-hybrid' }) });
@@ -695,7 +696,7 @@ function registerIpc() {
       const busy = queueBlocksSwitch();
       if (busy) return busy;
       if (welcomeMessage) throw new Error('首次配置正在启动，请稍候。');
-      await autodl.launch(server, __dirname, { profile, upscale: upscale === true });
+      await autodl.launch(server, workflowRoot, { profile, upscale: upscale === true });
       applyConfig({ setupWatch: { id, profile, upscale: upscale === true, pending: true, endpoint: selfcheck.endpoint(server) } });
       saveConfig(configFile, config);
       return { ok: true };
@@ -919,10 +920,10 @@ function registerIpc() {
   ipcMain.handle('templates:list', () => ({
     ok: true,
     current: config.workflowTemplate,
-    templates: listTemplates(path.join(__dirname, 'workflow-templates')).filter((t) => t.kind !== 'image' && t.kind !== 'upscale'),
+    templates: listTemplates(path.join(workflowRoot, 'workflow-templates')).filter((t) => t.kind !== 'image' && t.kind !== 'upscale'),
   }));
   ipcMain.handle('templates:set', (_e, { id } = {}) => {
-    const found = listTemplates(path.join(__dirname, 'workflow-templates')).find((t) => t.dirName === id);
+    const found = listTemplates(path.join(workflowRoot, 'workflow-templates')).find((t) => t.dirName === id);
     if (!found || found.kind === 'image' || found.kind === 'upscale') return { ok: false, errors: ['未找到该工作流模板'] };
     if (!found.compatible) return { ok: false, errors: [`「${found.name}」是旧版模板，尚未升级到当前表单格式`] };
     const previous = config.workflowTemplate;
@@ -1337,7 +1338,7 @@ function createWindow({ show, offscreen = false }) {
   Menu.setApplicationMenu(null);
   win.on('focus', () => win.flashFrame(false));
   // the page is built by `npm run build` into ui/dist; LAUNCHER_DEV_URL points at the Vite dev server instead
-  if (process.env.LAUNCHER_DEV_URL) win.loadURL(process.env.LAUNCHER_DEV_URL);
+  if (!app.isPackaged && process.env.LAUNCHER_DEV_URL) win.loadURL(process.env.LAUNCHER_DEV_URL);
   else win.loadFile(path.join(__dirname, 'ui', 'dist', 'index.html'));
   return win;
 }
@@ -1380,7 +1381,7 @@ if (!app.requestSingleInstanceLock()) {
       : path.join(app.getPath('userData'), 'config.json');
     if (!SMOKE) {
       try {
-        startupNotice = migrateLegacyUserData({ fromDir: path.join(app.getPath('appData'), 'comfyui-launcher'), toDir: app.getPath('userData') }).message;
+        startupNotice = migrateLegacyUserData({ fromDir: path.join(path.dirname(app.getPath('userData')), 'comfyui-launcher'), toDir: app.getPath('userData') }).message;
       } catch (e) {
         startupNotice = `旧版本设置搬迁失败:${e.message}`;
       }
@@ -1394,7 +1395,7 @@ if (!app.requestSingleInstanceLock()) {
     runtime = createRuntime({ getConfig: () => config });
     workflowService = createWorkflowService({
       getTemplateDir: () => {
-        const root = path.join(__dirname, 'workflow-templates');
+        const root = path.join(workflowRoot, 'workflow-templates');
         const chosen = config.workflowTemplate || 'minimax-h3-hybrid';
         const dir = path.join(root, chosen);
         return fs.existsSync(path.join(dir, 'template.json')) ? dir : path.join(root, 'minimax-h3-hybrid');
@@ -1430,7 +1431,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     shotService = createShotService({
       getProject: shotProject,
-      templatesDir: path.join(__dirname, 'workflow-templates'),
+      templatesDir: path.join(workflowRoot, 'workflow-templates'),
       queue: generationQueue,
       trash: SMOKE ? (p) => fs.promises.rm(p) : (p) => shell.trashItem(p),
       getTargetId: () => config.target || 'local',
@@ -1446,7 +1447,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     upscaleService = createUpscaleService({
       getProject: shotProject,
-      templatesDir: path.join(__dirname, 'workflow-templates'),
+      templatesDir: path.join(workflowRoot, 'workflow-templates'),
       queue: generationQueue,
       // the card that renders now: the server's when remote (its status carries the server's numbers)
       getVram: () => lastStatus && lastStatus.vramTotal,
@@ -1455,7 +1456,7 @@ if (!app.requestSingleInstanceLock()) {
     });
     assetService = createAssetService({
       getProject: shotProject,
-      templatesDir: path.join(__dirname, 'workflow-templates'),
+      templatesDir: path.join(workflowRoot, 'workflow-templates'),
       queue: generationQueue,
       trash: SMOKE ? (p) => fs.promises.rm(p) : (p) => shell.trashItem(p),
     });

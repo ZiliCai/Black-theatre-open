@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { Client, utils } = require('ssh2');
-const { commandArgs, explainSsh } = require('./remote-servers');
+const { sshExecutable, commandArgs, explainSsh } = require('./remote-servers');
 
 const exec = promisify(execFile);
 const LINKS = Object.freeze({
@@ -83,7 +83,7 @@ async function probe(server, execute = exec) {
   const log = path.join(directory, 'probe.log');
   try {
     await fs.writeFile(log, '', { mode: 0o600, flag: 'wx' });
-    await execute('ssh', ['-n', '-E', log, '-v', '-o', 'FingerprintHash=sha256', ...commandArgs(server, 'true')], { windowsHide: true, timeout: 25000 });
+    await execute(sshExecutable, ['-n', '-E', log, '-v', '-o', 'FingerprintHash=sha256', ...commandArgs(server, 'true')], { windowsHide: true, timeout: 25000 });
     return null;
   } catch (e) {
     const output = (await fs.readFile(log, 'utf8').catch(() => '')) + (e.stderr || '');
