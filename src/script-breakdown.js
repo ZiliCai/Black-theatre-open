@@ -164,7 +164,7 @@ const LIST_SYSTEM = `你是短剧的分镜师。把用户给的这一段剧本�
 - duration：秒数，2–15，一般 4–10。
 - description：一到三句中文。写清景别和机位（远景、中景、近景、特写；固定、跟拍、推近），谁在画面里，做什么，说什么。只写画面里看得见、听得见的东西。
 - cast：这一镜画面里出现的人物卡代号，主要的在前，最后加这一镜地点的场景卡代号。只能用「素材卡」里的代号，最多 6 个；素材卡里没有的人或地方不写进 cast，在 description 里用文字描写。
-- continue：这一镜和上一镜是同一机位、同一时刻接着发生的动作时写 true；换了机位、景别、地点或跳了时间写 false。`;
+- continue：「接上一镜」会从上一镜最后几帧接着生成画面，只适合同一个机位、同一个景别、画面没有切的连续动作，这时写 true。只要换了景别（比如中景换近景）、换了机位、换了地点或跳了时间，一律写 false。正常剪辑里大多数镜头都是 false。`;
 
 function buildListMessages({ chunk, cards = [], style = '', episode = '', part = 1, parts = 1, before = [] }) {
   const user = [
@@ -188,13 +188,30 @@ function normalizeShot(item, codes) {
   return { title: clip(item.title, 20) || clip(description, 10), duration, description: description.slice(0, 1000), cast, continue: item.continue === true };
 }
 
+const FRAMING = /大特写|特写|中近景|近景|中景|全景|远景|大远景|过肩/;
+const framingOf = (text) => { const m = FRAMING.exec(String(text || '')); return m ? m[0] : ''; };
+
+// 「接上一镜」 starts from the last frames of the shot before, so it only works when the camera does not cut. The AI
+// marks it too often (in a real 112-shot run: 73 times, 52 of them across a change of framing); a shot whose framing
+// differs from the one before cannot continue it.
+function fixContinuity(shots, before = null) {
+  shots.forEach((shot, i) => {
+    const prev = i > 0 ? shots[i - 1] : before;
+    if (!shot.continue) return;
+    const a = framingOf(prev && prev.description);
+    const b = framingOf(shot.description);
+    if (!prev || (a && b && a !== b)) shot.continue = false;
+  });
+  return shots;
+}
+
 // → [{ title, duration, description, cast, continue }]; codes nobody knows are dropped from cast
-function parseList(raw, codes) {
+function parseList(raw, codes, before = null) {
   const data = parseJson(raw);
   if (!Array.isArray(data.shots)) throw new Error('JSON 里没有 shots 列表');
   const shots = data.shots.map((s) => normalizeShot(s, codes)).filter(Boolean);
   if (!shots.length) throw new Error('镜头清单是空的');
-  return shots;
+  return fixContinuity(shots, before);
 }
 
 // ---------------------------------------------------------------- documents
@@ -349,7 +366,7 @@ function createScriptBreakdown({ getPaths, getCards = () => [], getStyle = () =>
         progress(`拆第 ${episode.id.replace(/^E0*/, '')} 集的镜头${chunks.length > 1 ? `（${i + 1}/${chunks.length} 段）` : ''}`);
         const shots = await ask(
           buildListMessages({ chunk: chunks[i], cards, style, episode: episode.id.replace(/^E0*/, ''), part: i + 1, parts: chunks.length, before: episode.shots.slice(-2) }),
-          (raw) => parseList(raw, codes), '剧本拆分镜·镜头清单',
+          (raw) => parseList(raw, codes, episode.shots[episode.shots.length - 1] || null), '剧本拆分镜·镜头清单',
         );
         if (!episode.shots.length && shots[0]) shots[0].continue = false;
         episode.shots.push(...shots);
@@ -549,6 +566,6 @@ function createScriptBreakdown({ getPaths, getCards = () => [], getStyle = () =>
 }
 
 module.exports = {
-  createScriptBreakdown, splitEpisodes, chunkText, cnNumber, buildCastMessages, parseCast, buildListMessages, parseList,
+  createScriptBreakdown, splitEpisodes, chunkText, cnNumber, buildCastMessages, parseCast, buildListMessages, parseList, fixContinuity,
   cardsDoc, motionDoc, motionBlock, CARDS_DOC,
 };

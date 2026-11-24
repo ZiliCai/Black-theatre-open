@@ -72,9 +72,22 @@ test('shot list: unknown codes dropped, lengths kept in range, empty shots skipp
   assert.equal(shots.length, 2);
   assert.deepEqual(shots[0].cast, ['ZS', 'S-LJ']);
   assert.equal(shots[0].duration, 15);
-  assert.equal(shots[0].continue, true);
+  assert.equal(shots[0].continue, false, 'nothing before the first shot to continue');
   assert.equal(shots[1].duration, 6);
   assert.ok(shots[1].title);
+});
+
+test('a shot whose framing changes cannot continue the one before', () => {
+  const shots = B.fixContinuity([
+    { description: '中景固定，头灯亮起。', continue: true },
+    { description: '近景，她看表。', continue: true },
+    { description: '近景，她抬头。', continue: true },
+    { description: '她往前走了一步。', continue: true },
+    { description: '特写，表盘。', continue: false },
+  ]);
+  assert.deepEqual(shots.map((s) => s.continue), [false, false, true, true, false]);
+  // across two pieces of the same episode: the last shot of the piece before counts
+  assert.equal(B.fixContinuity([{ description: '远景，洞口。', continue: true }], { description: '近景，她。' })[0].continue, false);
 });
 
 test('a reply without the list is an error', () => {
