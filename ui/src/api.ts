@@ -58,6 +58,16 @@ export type LinkNote = { from: string; reason: string; remark: string; at: numbe
 // the script discussion: what the AI is shown, and the conversation with the edits each reply proposed
 export type ChatEdit = { id: string; doc: string; find: string; replace: string; why: string; state: 'todo' | 'applied' };
 export type ChatMessage = { id: string; role: 'user' | 'assistant'; text: string; at: number; edits?: ChatEdit[]; shots?: Affect[]; shotsDone?: boolean };
+export type BreakdownCard = { code: string; kind: 'char' | 'scene'; name: string; look: string };
+export type BreakdownShot = { title: string; duration: number; description: string; cast: string[]; continue: boolean; status?: 'todo' | 'done' | 'failed'; error?: string; prompt?: string; codes?: string[] };
+export type BreakdownEpisode = { id: string; title: string; doc?: string; shots: BreakdownShot[] };
+export type BreakdownPlan = { style: string; cards: BreakdownCard[]; episodes: BreakdownEpisode[] };
+export type BreakdownState = BreakdownPlan & {
+  phase: 'planning' | 'review' | 'writing' | 'stopped' | 'done' | 'failed';
+  existing: BreakdownCard[]; cardsDoc?: string; error: string; sources: { relPath: string }[];
+  progress: { done: number; total: number; label: string } | null;
+};
+export type Breakdown = Result & { running: '' | 'plan' | 'write'; stopping: boolean; state: BreakdownState | null; docs: { relPath: string; name: string; category: string; chars: number }[]; limit: number };
 export type ScriptChat = Result & { docs: { relPath: string; name: string; chars: number; chosen: boolean }[]; chosenChars: number; limit: number; messages: ChatMessage[]; busy: boolean; doc?: string };
 export type Episode = { id: string; shots: ShotRow[] };
 export type TemplateForm = {
@@ -189,6 +199,12 @@ type Bridge = {
   undoScriptChatEdit: Fn<{ messageId: string; editId: string }, ScriptChat>;
   scriptChatShotsDone: Fn<{ messageId: string }, ScriptChat>;
   clearScriptChat: Fn<void, ScriptChat>;
+  loadBreakdown: Fn<void, Breakdown>;
+  startBreakdown: Fn<{ relPaths: string[] }, Breakdown>;
+  updateBreakdown: Fn<{ plan: BreakdownPlan }, Breakdown>;
+  writeBreakdown: Fn<void, Breakdown>;
+  stopBreakdown: Fn<void, Breakdown>;
+  discardBreakdown: Fn<void, Breakdown>;
   sceneList: Fn<void, Result & { scenes?: SceneRow[]; folder?: string; noProject?: boolean }>;
   sceneOpen: Fn<{ id: string }, Result & { id?: string; scene?: Scene; version?: string; built?: SceneBuilt; problems?: SceneProblem[]; broken?: boolean; text?: string }>;
   sceneBuild: Fn<{ scene: Scene; setup?: string }, Result & { built: SceneBuilt; problems: SceneProblem[]; facts?: Record<string, string> }>;

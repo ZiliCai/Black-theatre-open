@@ -29,6 +29,8 @@ const { buildOptimizerMessages, parseOptimizedText } = require('./src/prompt-opt
 const { rewriteShotPrompt, rewritePicture } = require('./src/prompt-rewrite');
 const { composeShot } = require('./src/shot-compose');
 const { createScriptChat } = require('./src/script-chat');
+const { createScriptBreakdown } = require('./src/script-breakdown');
+const { listCards } = require('./src/asset-cards');
 const { createSceneService } = require('./src/scene-service');
 const sceneAi = require('./src/scene-ai');
 const docsLib = require('./src/docs');
@@ -75,6 +77,7 @@ let generationQueue = null;
 let shotService = null;
 let assetService = null;
 let scriptChat = null;
+let scriptBreakdown = null;
 let usageLog = null;
 let sceneService = null;
 let sceneBuilding = false;
@@ -961,6 +964,13 @@ function registerIpc() {
   ipcMain.handle('script-chat:undo', (_e, { messageId, editId } = {}) => scriptChat.undo(String(messageId || ''), String(editId || '')));
   ipcMain.handle('script-chat:shots-done', (_e, { messageId } = {}) => scriptChat.shotsDone(String(messageId || '')));
   ipcMain.handle('script-chat:clear', () => scriptChat.clear());
+  // ---------- a whole script into shots ----------
+  ipcMain.handle('breakdown:load', () => scriptBreakdown.load());
+  ipcMain.handle('breakdown:start', (_e, { relPaths } = {}) => scriptBreakdown.start(relPaths));
+  ipcMain.handle('breakdown:update', (_e, { plan } = {}) => scriptBreakdown.update(plan));
+  ipcMain.handle('breakdown:write', () => scriptBreakdown.write());
+  ipcMain.handle('breakdown:stop', () => scriptBreakdown.stop());
+  ipcMain.handle('breakdown:discard', () => scriptBreakdown.discard());
   ipcMain.handle('shots:link-note', (_e, { shotId, from, reason, remark } = {}) => shotService.noteLink(String(shotId || ''), { from, reason, remark }));
   ipcMain.handle('shots:link-clear', (_e, { shotId } = {}) => shotService.clearLink(String(shotId || '')));
   ipcMain.handle('workflow:preview', (_e, values) => workflowService.preview(values));
@@ -1290,6 +1300,16 @@ if (!app.requestSingleInstanceLock()) {
         return r.ok ? r.episodes.flatMap((e) => e.shots.map((s) => s.id)) : [];
       },
       llm: async (messages) => completeLlm(config.llm, await llmKey(), { ...messages, purpose: '剧本讨论' }),
+    });
+    scriptBreakdown = createScriptBreakdown({
+      getPaths: activeScriptPaths,
+      getCards: () => (assetService ? assetService.brief() : []),
+      getStyle: () => {
+        const paths = activeScriptPaths();
+        const listed = paths ? listCards({ docsDir: paths.docsDir }) : null;
+        return (listed && listed.cards[0] && listed.cards[0].style) || '';
+      },
+      llm: async (messages) => completeLlm(config.llm, await llmKey(), messages),
     });
     registerIpc();
     protocol.handle('media', serveMedia);

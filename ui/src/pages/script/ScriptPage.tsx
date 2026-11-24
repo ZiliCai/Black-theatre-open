@@ -6,6 +6,7 @@ import { LauncherFormat as fmt } from '../../legacy';
 import { useApp } from '../../shell/context';
 import { MarkdownView } from './MarkdownView';
 import { ScriptChat } from './ScriptChat';
+import { Breakdown } from './Breakdown';
 import './script.css';
 
 type Doc = { relPath: string; name: string; category: string; mtimeMs: number; size: number };
@@ -38,6 +39,7 @@ export function ScriptPage() {
     setChatOpen(on);
     try { localStorage.setItem('blackbox.script.chat', on ? '1' : '0'); } catch { /* remembered for this run only */ }
   };
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const state = useRef({ open, text, dirty });
   state.current = { open, text, dirty };
 
@@ -213,6 +215,7 @@ export function ScriptPage() {
         <div className="head">
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         <Button id="btn-script-chat" on={chatOpen ? 'acc' : false} onClick={() => showChat(!chatOpen)}><Icon name="sparkle" />AI 讨论</Button>
+        <Button id="btn-breakdown" title="把整份剧本拆成镜头，写好每一镜的提示词" onClick={() => setBreakdownOpen(true)}><Icon name="film" />拆分镜</Button>
         <Button id="btn-doc-new" onClick={async () => { if (await canLeave()) setCreating({ name: '', category: '其他', touched: false, error: '' }); }}><Icon name="plus" />新建文档</Button>
           </div>
           <TextInput small id="doc-search" value={query} placeholder="搜索全部文档…" onChange={(e) => setQuery(e.target.value)} />
@@ -297,6 +300,8 @@ export function ScriptPage() {
             if (state.current.open && state.current.open.relPath === rel && !state.current.dirty) await openDoc(rel);
           }} />
       ) : null}
+
+      {breakdownOpen ? <Breakdown onClose={() => { setBreakdownOpen(false); loadList(); }} onDocsChanged={loadList} /> : null}
 
       {creating ? (
         <Modal title="新建设定文档" onClose={() => setCreating(null)} actions={<>

@@ -15,6 +15,7 @@ const API = [
   'listDocs', 'readDoc', 'saveDoc', 'getGallery', 'getModels', 'getDirs', 'testLlm', 'reviseWorkflowPrompt',
   'shotEpisodes', 'shotDetail', 'saveShotDraft', 'writeShotPrompt', 'enqueueTakes', 'setTakeTier', 'createManualShot', 'composeShot', 'deleteShot', 'shotTimeline',
   'assetCards', 'assetDetail', 'saveAssetDraft', 'enqueuePictures', 'setPictureTier', 'setMainPicture', 'relabelPicture', 'unkeepPicture', 'adoptPicture', 'assetSets',
+  'loadBreakdown', 'startBreakdown', 'updateBreakdown', 'writeBreakdown', 'stopBreakdown', 'discardBreakdown',
   'queueSnapshot', 'cancelTake', 'cancelAllTakes', 'retryQueue', 'onStatus', 'onAlert', 'onQueue', 'onNotice',
 ];
 // the people-and-places list the 素材 page reads its cards from
@@ -164,6 +165,18 @@ function fakeLlm() {
           ].join('\n');
           const content = `<note>她望向隧道</note>\n<meta>{"title":"望向隧道","duration":5,"references":[],"continue":false}</meta>\n<prompt>\n${prompt}\n</prompt>`;
           return res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+        }
+        // 剧本拆分镜: the people and places, then the shot list of the one episode
+        if (body.includes('短剧的美术统筹')) {
+          const cast = { style: '写实电影质感', cards: [{ code: 'LZ', kind: '人物', name: '老周', look: '六十岁，地铁检修工，蓝色工装' }, { code: 'S-SD', kind: '场景', name: '隧道', look: '昏暗的地铁隧道，检修灯' }] };
+          return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(cast) } }] }));
+        }
+        if (body.includes('短剧的分镜师')) {
+          const list = { shots: [
+            { title: '老周进隧道', duration: 5, description: '远景，老周提着检修灯走进隧道。', cast: ['LZ', 'S-SD'], continue: false },
+            { title: '看见铁门', duration: 6, description: '中景，老周停下，说「这门怎么开了」。', cast: ['LZ', 'S-SD'], continue: true },
+          ] };
+          return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(list) } }] }));
         }
         // the script discussion answers with talk, one document edit and one shot to change
         if (body.includes('编剧搭档')) {
@@ -616,6 +629,31 @@ async function runSmoke(h) {
     if (talked.messages.length !== 2 || !talked.messages[1].shotsDone) return fail('the discussion was not kept with the project');
     if (!JSON.parse(fs.readFileSync(path.join(projectDir, '.blackbox', 'link-notes.json'), 'utf8')).notes['MOTION-E01-02']) return fail('a shot left unchanged got no note');
     await click('#btn-script-chat');
+
+    // ---- 剧本 · 拆分镜: a script document into cards and shots, prompts written, documents made ----
+    await click('#btn-breakdown');
+    await waitFor("!!document.getElementById('btn-bd-start')", 5000, 'the breakdown dialog');
+    await js("[...document.querySelectorAll('#breakdown .bd-docs label')].find((l) => l.textContent.includes('01_世界观')).querySelector('input').click()");
+    await shot('breakdown-pick');
+    await click('#btn-bd-start');
+    await waitFor("!!document.getElementById('btn-bd-write') && document.querySelectorAll('#breakdown .bd-shot').length === 2", 10000, 'the shot list to review');
+    await shot('breakdown-review');
+    await click('#btn-bd-write');
+    await waitFor("!!document.querySelector('#dialog [data-choice=\"ok\"]')", 3000, 'the question before writing');
+    await click('#dialog [data-choice="ok"]');
+    await waitFor("(document.getElementById('breakdown') || {}).textContent?.includes('都写好了')", 15000, 'every shot written');
+    await shot('breakdown-done');
+    const splitDoc = path.join(projectDir, '剧本', '分镜', 'MOTION-E02.md');
+    const split = fs.existsSync(splitDoc) ? fs.readFileSync(splitDoc, 'utf8') : '';
+    if (!split.includes('## MOTION-E02-002 · 看见铁门') || !split.includes('> subject_definitions:') || !split.includes('- 接续上一镜：是')) return fail(`the split episode document is not what the shot page reads:\n${split}`);
+    if (!fs.readFileSync(path.join(projectDir, '剧本', '人物与场景（AI 拆分）.md'), 'utf8').includes('| LZ | 老周 |')) return fail('the new cards did not reach their list');
+    await js("[...document.querySelectorAll('#breakdown footer button')].find((b) => b.textContent.includes('清除')).click()");
+    await waitFor("!!document.getElementById('btn-bd-start')", 5000, 'the breakdown cleared');
+    await js("[...document.querySelectorAll('#breakdown footer button')].find((b) => b.textContent === '取消').click()");
+    await waitFor("!document.getElementById('breakdown')", 3000, 'the breakdown dialog closed');
+    // the rest of the run expects the project as it was
+    fs.rmSync(path.join(projectDir, '剧本', '分镜'), { recursive: true, force: true });
+    fs.rmSync(path.join(projectDir, '剧本', '人物与场景（AI 拆分）.md'), { force: true });
 
     // ---- 场景: the whitebox drawn, a change asked of the AI shown before it is applied, camera shots saved ----
     const sceneFile = path.join(projectDir, '白模', '地铁站.scene.json');
