@@ -12,6 +12,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'autodl'))
 import models
 import ranges
+from progress import DownloadProgress
 from acceptance import prepare_graph
 
 
@@ -93,6 +94,25 @@ class ModelInstallTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '已有文件'):
             models.plan(dest, {'a': self.spec}, external, lambda _: None)
         self.assertEqual((dest / 'a').read_bytes(), b'existing')
+
+    def test_progress_combines_cache_resumes_and_parallel_transfers(self):
+        a, b = self.root / 'a', self.root / 'b'
+        (self.root / 'a.part').write_bytes(b'x' * 10)
+        specs = {name: {'bytes': 100} for name in ('a', 'b', 'cached')}
+        with patch('progress.time.monotonic', return_value=100) as clock:
+            meter = DownloadProgress(specs, [(a, specs['a']), (b, specs['b'])])
+            self.assertEqual(meter.snapshot()['saved'], 110)
+            clock.return_value = 110
+            meter.record(a, 40)
+            meter.record(b, 20)
+            self.assertEqual(meter.snapshot()['saved'], 160)
+            self.assertEqual(meter.snapshot()['rate'], 5)
+            meter.record(b, 0)
+            self.assertEqual(meter.snapshot()['rate'], 0)
+            meter.record(a, 100)
+            meter.record(b, 100)
+            self.assertEqual(meter.snapshot()['saved'], 300)
+            self.assertEqual(meter.snapshot()['total'], 300)
 
     def test_reference_and_card_specific_encoder(self):
         graph = {'1': {'inputs': {'clip_name': models.FP4, 'image': 'ref/bbt_acceptance.png [output]',

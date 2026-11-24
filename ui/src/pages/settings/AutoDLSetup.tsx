@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { api, mediaUrl, type SetupState, type RemoteServer } from '../../api';
-import { Button, Field, Select } from '../../components';
+import { SetupProgress } from './SetupProgress';
+import { ProfileSelect } from './CloudWelcome';
+import { Button } from '../../components';
 
-export function AutoDLSetup({ server }: { server: RemoteServer }) {
+export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial?: { profile: string; upscale: boolean } }) {
   const storageKey = 'autodl-setup:' + JSON.stringify([server.id, server.host, server.port, server.user, server.comfyPort]);
-  const [watch, setWatch] = useState(() => localStorage.getItem(storageKey) === '1');
-  const [profile, setProfile] = useState('wenwu');
-  const [upscale, setUpscale] = useState(false);
+  const [watch, setWatch] = useState(() => !!initial || localStorage.getItem(storageKey) === '1');
+  const [profile, setProfile] = useState(initial?.profile || 'wenwu');
+  const [upscale, setUpscale] = useState(initial?.upscale || false);
   const [uploading, setUploading] = useState(false);
   const [state, setState] = useState<SetupState | null>(null);
   const [error, setError] = useState('');
@@ -50,15 +52,13 @@ export function AutoDLSetup({ server }: { server: RemoteServer }) {
       setRound((n) => n + 1);
     }
   }
-  const busy = uploading || state?.status === 'running' || state?.status === 'ready';
+  const busy = uploading || (watch && !state && !error) || state?.status === 'running' || state?.status === 'ready';
   return <section className="card">
-    <h3>AutoDL 一键配置</h3>
+    <div className="welcome-heading"><h3>AutoDL 一键配置</h3><span className="muted">{server.name}</span></div>
+    {state && !uploading && <SetupProgress state={state} offline={!!error} />}
+    {watch && !state && !error && !uploading && <div role="status">正在读取云端进度…<progress aria-label="正在读取云端进度" /></div>}
     <p className="muted">环境和模型安装到实例的数据盘。云端会实际生成验收素材，选择视频工作流时还会取回约 4 秒的短片。实例按平台规则计费，用完请到 AutoDL 关机。</p>
-    <Field label="安装工作流"><Select value={profile} disabled={busy} onChange={(e) => setProfile(e.target.value)}>
-      <option value="wenwu">Qwen 素材 + 文武双全（含接续）</option>
-      <option value="hybrid">Qwen 素材 + Hybrid</option>
-      <option value="image">仅 Qwen 素材出图</option>
-    </Select></Field>
+    <ProfileSelect value={profile} disabled={busy} change={setProfile} />
     <label><input type="checkbox" checked={upscale} disabled={busy} onChange={(e) => setUpscale(e.target.checked)} /> 同时安装 SeedVR2 超分</label>
     <div className="actions">
       <Button id="btn-autodl-setup" variant="primary" disabled={busy} onClick={install}>
@@ -66,7 +66,7 @@ export function AutoDLSetup({ server }: { server: RemoteServer }) {
       </Button>
       {!busy && <Button size="sm" onClick={() => { setWatch(true); setRound((n) => n + 1); }}>查看云端进度</Button>}
     </div>
-    {state?.message && <div role="status" className={state.status === 'failed' ? 'errors' : 'note-box'}>{state.message}</div>}
+    {uploading && <progress aria-label="正在上传安装包" />}
     {state?.gpu && <p className="muted">{state.gpu}</p>}
     {state?.space && <p className="muted">{state.space}</p>}
     {error && <div role="status" className="errors">{error}</div>}

@@ -62,7 +62,10 @@ export function App() {
     api.queueSnapshot().then(setQueue);
     // a setting that keeps ComfyUI from starting is the first thing to see
     api.getConfig().then((r) => {
-      if (!r.validation.ok) {
+      if (r.config.cloudWelcome === 'pending' || (r.config.cloudWelcome === 'watch' && r.config.target === r.config.setupWatch?.id)) {
+        setPage('settings');
+        setSettingsTab(r.config.cloudWelcome === 'pending' ? 'welcome' : 'remote');
+      } else if (!r.validation.ok && r.config.target === 'local') {
         setPage('settings');
         setSettingsTab('general');
       }

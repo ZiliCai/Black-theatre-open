@@ -73,3 +73,10 @@
 .usage-table td.n, .usage-table th.n { text-align: right; font-variant-numeric: tabular-nums; }
 .usage-table .dim { color: var(--dim); margin-left: 4px; }
 .usage-table .price { width: 72px; text-align: right; }
+
+.welcome-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); flex-wrap: wrap; }
+.set-inner progress { display: block; width: 100%; height: 8px; margin: 8px 0; accent-color: var(--acc); }
+.setup-progress, .shutdown-plan { display: grid; gap: var(--s3); }
+.setup-progress { border-top: 1px solid var(--line); padding-top: var(--s4); font-variant-numeric: tabular-nums; }
+.shutdown-plan { padding: var(--s3); background: var(--bg); border-radius: var(--r2); }
+.shutdown-plan input { max-width: 9em; }

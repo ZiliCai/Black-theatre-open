@@ -137,8 +137,9 @@ export type RemoteServer = {
   comfyPort: number; startCommand: string; modelSwaps: Record<string, string>;
 };
 export type Tunnel = { state: 'off' | 'connecting' | 'open' | 'down'; kind: string; message: string; port: number | null; serverId: string; since: number };
-export type SetupState = { status: 'idle' | 'running' | 'ready' | 'done' | 'failed'; message: string; gpu?: string; space?: string; preview?: string };
-export type RemotePayload = { ok: true; target: string; servers: RemoteServer[]; tunnel: Tunnel };
+export type DownloadStats = { total: number; saved: number; rate: number; updated: number };
+export type SetupState = { phase?: string; video?: boolean; download?: DownloadStats; status: 'idle' | 'running' | 'ready' | 'done' | 'failed'; message: string; gpu?: string; space?: string; preview?: string };
+export type RemotePayload = { setupWatch?: { id: string; profile: string; upscale: boolean }; ok: true; target: string; servers: RemoteServer[]; tunnel: Tunnel };
 export type ServerTest = { ok: boolean; message?: string; steps: { label: string; ok: boolean; detail: string }[] };
 export type Alert = { title: string; sub: string; count?: number } | null;
 export type LlmPriceRow = { model: string; hit: [number, number]; miss: [number, number]; out: [number, number] };
@@ -156,6 +157,9 @@ type Bridge = {
   llmUsage: Fn<void, LlmUsage>; setLlmPrices: Fn<LlmPrices | null, { ok: boolean; message?: string; prices?: LlmPrices }>;
   start: Fn<void, Result>; stop: Fn<void, Result>; restart: Fn<void, Result>; clearCache: Fn<void, Result>;
   openUI: Fn<void, void>; openLog: Fn<void, void>;
+  cloudInfo: Fn<void, { busy: boolean; message: string; watching: boolean; keySaved: boolean }>;
+  cloudOpen: Fn<'instance' | 'deepseek', void>; cloudSkip: Fn<void, boolean>;
+  cloudInstall: Fn<{ login: string; password: string; apiKey: string; profile: string }, Result>;
   autodlStart: Fn<{ id: string; profile: string; upscale: boolean }, Result>;
   autodlStatus: Fn<{ id: string }, SetupState>;
   remoteGet: Fn<void, RemotePayload>; remoteSave: Fn<RemoteServer, (RemotePayload & { saved: string }) | { ok: false; message: string }>;

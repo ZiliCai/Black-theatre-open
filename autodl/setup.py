@@ -17,6 +17,7 @@ import urllib.request
 from acceptance import Comfy, prepare_graph
 from models import GIB, FP4, INT8, digest, download, ensure_space, inventory, plan
 from service import listening, start
+from progress import DownloadProgress
 
 BUNDLE = Path(__file__).resolve().parent.parent
 CORE = '73c9bad4d21e7addbe1d13bc92eee0f1431b017d'
@@ -128,6 +129,7 @@ def execute(root, port, state):
             print(text, flush=True)
     recipe = json.loads((BUNDLE / 'recipe.json').read_text())
     catalog = json.loads((BUNDLE / 'autodl/models.json').read_text())
+    state['video'] = bool(recipe.get('video'))
     step('check', '正在检查 GPU、驱动和数据盘')
     gpu = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,driver_version,compute_cap',
                                    '--format=csv,noheader,nounits', '--id=0'], text=True).strip()
@@ -157,19 +159,33 @@ def execute(root, port, state):
             environment(root, recipe['plugins'])
             shutil.copyfile(BUNDLE / 'autodl/service.py', root / 'service.py')
 
+        progress = DownloadProgress(files, pending)
+        state['download'] = progress.snapshot()
+        last_write = 0
+        def report(dest, size):
+            nonlocal last_write
+            with state_lock:
+                progress.record(dest, size)
+                now = time.monotonic()
+                if now - last_write >= 1 or size == progress.sizes[dest]:
+                    last_write = now
+                    state.update(phase='models', message='正在下载并校验模型 · ' + dest.name, download=progress.snapshot())
+                    write_json(root / 'state.json', state)
         step('environment', '正在安装 ComfyUI、GPU 运行库和插件')
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             runtime = pool.submit(install_runtime)
-            finished = 0
+            remaining = len(pending)
             def get_model(entry):
                 dest, spec = entry
-                download(dest, spec, lambda msg: step('models', f'已完成 {finished}/{len(pending)} · {msg}'))
+                download(dest, spec, lambda size: report(dest, size))
             downloads = [pool.submit(get_model, entry) for entry in pending]
             try:
                 for work in concurrent.futures.as_completed([runtime, *downloads]):
                     work.result()
                     if work is not runtime:
-                        finished += 1
+                        remaining -= 1
+                        if not remaining and not runtime.done():
+                            step('environment', '模型已校验，正在等待运行环境和插件安装完成')
             except Exception:
                 for work in downloads:
                     work.cancel()
@@ -270,11 +286,15 @@ def main():
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
+            active = json.loads(statefile.read_text()) if statefile.is_file() else {}
+            if active.get('bundle') != BUNDLE.name:
+                raise SystemExit('这台实例正在运行另一项安装配置，请等待它结束后重试。')
             print('running')
             return
         previous = json.loads(statefile.read_text()) if statefile.exists() else {}
         reuse = previous.get('bundle') == BUNDLE.name and previous.get('status') in ('failed', 'running')
         state = previous if reuse else {'run': uuid.uuid4().hex}
+        state.pop('download', None)
         state.update(bundle=BUNDLE.name, status='running', phase='check', message='正在检查云机器')
         write_json(statefile, state)
         with (root / 'setup.log').open('w') as log:

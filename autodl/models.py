@@ -66,16 +66,17 @@ def download(dest, spec, notify):
     if spec['bytes'] >= 2 * ranges.CHUNK:
         for url in spec['urls']:
             try:
-                ranges.transfer(part, spec, url, lambda size: notify(
-                    f'{dest.name} · {size/GIB:.2f} / {spec["bytes"]/GIB:.2f} GiB'))
+                ranges.transfer(part, spec, url, notify)
             except (OSError, ValueError) as exc:
                 print(f'分段下载换源：{type(exc).__name__}', flush=True)
                 continue
             if matches(part, spec):
+                notify(spec['bytes'])
                 os.replace(part, dest)
                 ranges.journal(part).unlink(missing_ok=True)
                 return
             part.unlink(missing_ok=True)
+            notify(0)
             ranges.journal(part).unlink(missing_ok=True)
         ranges.contiguous(part, spec)
     for url in spec['urls']:
@@ -85,20 +86,28 @@ def download(dest, spec, notify):
             if size > spec['bytes']:
                 part.unlink()
                 size = 0
-            notify(f'{dest.name} · {size/GIB:.2f} / {spec["bytes"]/GIB:.2f} GiB')
+            notify(size)
             if size < spec['bytes']:
-                result = subprocess.run(['curl', '-fsSL', '--connect-timeout', '15', '--speed-time', '45',
+                result = subprocess.Popen(['curl', '-fsSL', '--connect-timeout', '15', '--speed-time', '45',
                                          '--speed-limit', '8192', '--retry', '2', '-C', '-', '-o', str(part), url])
+                while True:
+                    try:
+                        result.wait(timeout=2)
+                        break
+                    except subprocess.TimeoutExpired:
+                        notify(part.stat().st_size if part.is_file() else 0)
                 if result.returncode:
                     if result.returncode in (33, 36) and size and attempt == 0:
                         part.unlink(missing_ok=True)
                         continue
                     break
             if matches(part, spec):
+                notify(spec['bytes'])
                 os.replace(part, dest)
                 return
             if part.is_file() and part.stat().st_size >= spec['bytes']:
                 part.unlink()
+                notify(0)
             else:
                 break
     raise RuntimeError('模型下载或 SHA-256 校验失败：' + dest.name + '。检查云端网络后可继续。')

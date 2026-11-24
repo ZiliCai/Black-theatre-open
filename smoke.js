@@ -754,6 +754,55 @@ async function runSmoke(h) {
       await shot('shots-1280');
       win.setContentSize(1440, 900);
     }
+    // Use the real form, IPC, storage and progress polling with only the external services replaced.
+    const cloud = require('./src/cloud-onboarding');
+    const autodl = require('./src/autodl-setup');
+    const check = require('node:assert/strict');
+    const samplePassword = 'smoke-instance-only';
+    const sampleKey = 'sk-smoke-welcome';
+    const runId = 'c'.repeat(32);
+    const imageBytes = fs.readFileSync(path.join(FIXTURES, 'media', 'sample.png'));
+    let ready = false;
+    let launches = 0;
+    cloud.verifyDeepSeek = async (key) => { check.equal(key, sampleKey); return cloud.DEEPSEEK; };
+    cloud.connectInstance = async (server, password) => {
+      check.equal(password, samplePassword);
+      check.equal(server.host, 'smoke.seetacloud.com');
+      return { ...server, host: '127.0.0.1' };
+    };
+    autodl.launch = async (_server, _root, plan) => { check.equal(plan.profile, 'image'); launches++; };
+    autodl.status = async () => ready ? {
+      status: 'ready', phase: 'transfer', file: 'ref/bbt_acceptance_' + runId + '_00001.png', run: runId,
+      sha256: require('node:crypto').createHash('sha256').update(imageBytes).digest('hex'), bytes: imageBytes.length, video: false,
+    } : { status: 'running', phase: 'models', video: false, message: '正在下载测试模型',
+      download: { total: 8 * 2 ** 30, saved: 2 * 2 ** 30, rate: 8 * 2 ** 20, updated: Date.now() / 1000 } };
+    const reload = () => new Promise((resolve) => {
+      win.webContents.once('did-finish-load', resolve);
+      win.webContents.reload();
+    });
+    setConfig({ cloudWelcome: 'pending' });
+    await reload();
+    await waitFor("!!document.getElementById('welcome-login')", 6000, 'first run opens the cloud guide');
+    await shot('cloud-welcome');
+    await typeInto('#welcome-login', 'ssh -p 1 root@smoke.seetacloud.com');
+    await typeInto('#welcome-password', samplePassword);
+    await typeInto('#welcome-key', sampleKey);
+    await js("const profileSelect = document.querySelector('#tab-welcome select'); profileSelect.value = 'image'; profileSelect.dispatchEvent(new Event('change', { bubbles: true }))");
+    await click('#welcome-install');
+    await waitFor("document.querySelector('.setup-progress')?.textContent.includes('25%') && !!document.querySelector('.shutdown-plan')", 8000, 'one click starts the remote job and shows a download estimate');
+    check.equal(launches, 1);
+    check.ok(!fs.readFileSync(configFile, 'utf8').includes(samplePassword));
+    check.ok(!fs.readFileSync(configFile, 'utf8').includes(sampleKey));
+    await shot('cloud-download');
+    await reload();
+    await waitFor("document.querySelector('.shutdown-plan') && document.querySelector('#tab-remote select')?.value === 'image'", 5000, 'reopen the same installation and workflow');
+    const previewDir = path.join(h.app.getPath('userData'), 'autodl-previews');
+    fs.mkdirSync(previewDir, { recursive: true });
+    fs.writeFileSync(path.join(previewDir, runId + '.png'), imageBytes);
+    ready = true;
+    await waitFor("document.querySelector('.setup-progress')?.textContent.includes('已完成全部阶段') && !!document.querySelector('#tab-remote img')", 13000, 'verified local sample completes onboarding');
+    check.equal(h.getConfig().cloudWelcome, 'complete');
+    check.equal(launches, 1);
     report('SMOKE OK');
     h.app.exit(0);
   } catch (e) {

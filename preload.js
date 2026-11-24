@@ -25,6 +25,10 @@ contextBridge.exposeInMainWorld('launcher', {
   openUI: invoke('open:ui'),
   openLog: invoke('open:log'),
   // remote GPU servers
+  cloudInfo: invoke('cloud:info'),
+  cloudOpen: invoke('cloud:open'),
+  cloudSkip: invoke('cloud:skip'),
+  cloudInstall: invoke('cloud:install'),
   autodlStart: invoke('autodl:start'),
   autodlStatus: invoke('autodl:status'),
   remoteGet: invoke('remote:get'),

@@ -61,13 +61,17 @@ export function RemoteTab() {
 
   if (!data) return <div className="set-inner" />;
   const t = data.tunnel;
+  const selected = data.servers.find((s) => s.id === data.target);
   return (
     <div className="set-inner" id="tab-remote">
       <h2>远程 GPU</h2>
       <p className="lead">
         把出片放到租的云 GPU 服务器（比如 AutoDL）上跑：剧本、素材和成片都还在这台电脑的项目里，出片前自动把参考图传上去，出完把视频和接续文件取回来。
-        连接用 SSH 钥匙，软件不保存也不输入密码；服务器上的 ComfyUI 不对外开端口。
+        连接使用 SSH 密钥。第一次使用 AutoDL，可以从「首次云端配置」粘贴登录指令和实例密码。
       </p>
+
+      {selected && <AutoDLSetup key={JSON.stringify([selected.id, selected.host, selected.port, selected.user, selected.comfyPort])}
+        server={selected} initial={data.setupWatch?.id === selected.id ? data.setupWatch : undefined} />}
 
       <article className={`proj-card ${data.target === 'local' ? 'active' : ''}`}>
         <h3>本机{data.target === 'local' ? <span className="tag acc">正在使用</span> : null}</h3>
@@ -107,7 +111,6 @@ export function RemoteTab() {
                 setData(r);
               }}>删除</Button>
             </div>
-            {active && <AutoDLSetup key={JSON.stringify([s.id, s.host, s.port, s.user, s.comfyPort])} server={s} />}
           </article>
         );
       })}

@@ -44,6 +44,7 @@ const { createTakeStore } = require('./src/take-store');
 const { createAssetService } = require('./src/asset-service');
 const { createAssetStore } = require('./src/asset-store');
 const autodl = require('./src/autodl-setup');
+const cloud = require('./src/cloud-onboarding');
 const setupPreviews = () => path.join(app.getPath('userData'), 'autodl-previews');
 const { createRemoteTarget, testServer } = require('./src/remote-target');
 const { normalizeServer, validateServer } = require('./src/remote-servers');
@@ -626,7 +627,7 @@ function registerIpc() {
   });
 
   // ---------- remote GPU servers ----------
-  const remotePayload = () => ({ ok: true, target: config.target, servers: config.servers, tunnel: remoteTarget.tunnel() });
+  const remotePayload = () => ({ ok: true, target: config.target, servers: config.servers, setupWatch: config.setupWatch, tunnel: remoteTarget.tunnel() });
   const saveRemote = (patch) => {
     applyConfig(patch);
     saveConfig(configFile, config);
@@ -639,12 +640,63 @@ function registerIpc() {
     if (!server || server.id !== id) throw new Error('请先在这台服务器上选择「在这台上出片」');
     return server;
   };
+  let welcomeMessage = '';
+  ipcMain.handle('cloud:info', async () => ({
+    busy: !!welcomeMessage, message: welcomeMessage, watching: config.cloudWelcome === 'watch',
+    keySaved: config.llm.baseUrl === cloud.DEEPSEEK.baseUrl && !!(await llmKey()),
+  }));
+  ipcMain.handle('cloud:open', (_e, name) => {
+    if (Object.hasOwn(cloud.LINKS, name)) return shell.openExternal(cloud.LINKS[name]);
+  });
+  ipcMain.handle('cloud:skip', () => {
+    if (welcomeMessage) return false;
+    if (config.cloudWelcome === 'pending') {
+      applyConfig({ cloudWelcome: 'dismissed' });
+      saveConfig(configFile, config);
+    }
+    return true;
+  });
+  ipcMain.handle('cloud:install', async (_e, { login, password, apiKey, profile } = {}) => {
+    if (welcomeMessage) return { ok: false, message: '首次配置正在进行中。' };
+    try {
+      const busy = queueBlocksSwitch();
+      if (busy) return busy;
+      const endpoint = cloud.parseLogin(login);
+      if (!['wenwu', 'hybrid', 'image'].includes(profile)) throw new Error('请选择安装工作流。');
+      welcomeMessage = '正在验证 DeepSeek API Key…';
+      const key = String(apiKey || '').trim() || (config.llm.baseUrl === cloud.DEEPSEEK.baseUrl && await llmKey());
+      const llm = await cloud.verifyDeepSeek(key);
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储当前不可用。');
+      welcomeMessage = '正在登录 AutoDL 实例并验证 SSH 密钥…';
+      const loginServer = await cloud.connectInstance(endpoint, password, path.join(app.getPath('userData'), 'autodl-keys'));
+      const blocked = queueBlocksSwitch();
+      if (blocked) return blocked;
+      const existing = config.servers.find((s) => s.host === endpoint.host && s.port === endpoint.port && s.user === endpoint.user);
+      const server = normalizeServer({ id: 'srv-' + crypto.randomUUID(), name: 'AutoDL · ' + endpoint.host,
+        comfyPort: 8188, ...existing, ...loginServer });
+      const servers = [...config.servers.filter((s) => s.id !== server.id), server];
+      const setupWatch = { id: server.id, profile, upscale: false };
+      setLlmSecret(key);
+      saveRemote({ servers, target: server.id, llm: { ...config.llm, ...llm }, cloudWelcome: 'pending' });
+      welcomeMessage = '正在上传安装包并启动云端自检…';
+      await autodl.launch(server, __dirname, setupWatch);
+      // An older run on the same port must not complete this onboarding if the upload fails.
+      applyConfig({ setupWatch, cloudWelcome: 'watch',
+        ...(profile === 'image' || config.target !== server.id ? {} : { workflowTemplate: profile === 'wenwu' ? 'minimax-h3-wenwu-cont' : 'minimax-h3-hybrid' }) });
+      saveConfig(configFile, config);
+      return { ok: true };
+    } catch (e) { return { ok: false, message: e.message }; }
+    finally { welcomeMessage = ''; }
+  });
   ipcMain.handle('autodl:start', async (_e, { id, profile, upscale } = {}) => {
     try {
       const server = selectedServer(id);
       const busy = queueBlocksSwitch();
       if (busy) return busy;
+      if (welcomeMessage) throw new Error('首次配置正在启动，请稍候。');
       await autodl.launch(server, __dirname, { profile, upscale: upscale === true });
+      applyConfig({ setupWatch: { id, profile, upscale: upscale === true } });
+      saveConfig(configFile, config);
       return { ok: true };
     } catch (error) { return { ok: false, message: error.message }; }
   });
@@ -655,9 +707,12 @@ function registerIpc() {
       return now && ['id', 'user', 'host', 'port', 'comfyPort'].every((k) => now[k] === server[k]);
     };
     const s = await autodl.status(server);
-    if (s.status !== 'ready') return { status: s.status, message: s.message, gpu: s.gpu, space: s.space };
+    const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, video: s.video };
+    if (s.status !== 'ready') return view;
     if (!sameServer()) throw new Error('出片服务器已切换');
-    const preview = await autodl.collect(s, remoteTarget.port(), setupPreviews());
+    let preview;
+    try { preview = await autodl.collect(s, remoteTarget.port(), setupPreviews()); }
+    catch (e) { return { ...view, message: '正在取回验收文件。' + e.message }; }
     if (!sameServer()) throw new Error('出片服务器已切换');
     const current = remoteTarget.server();
     const dir = autodl.remoteDir(current.comfyPort);
@@ -669,7 +724,11 @@ function registerIpc() {
     if (startCommand !== current.startCommand || JSON.stringify(modelSwaps) !== JSON.stringify(current.modelSwaps)) {
       saveRemote({ servers: config.servers.map((p) => p.id === id ? { ...p, startCommand, modelSwaps } : p) });
     }
-    return { status: 'done', message: '配置完成，验收文件已取回本机并通过校验。', gpu: s.gpu, space: s.space, preview };
+    if (config.cloudWelcome === 'watch' && config.setupWatch?.id === id) {
+      applyConfig({ cloudWelcome: 'complete' });
+      saveConfig(configFile, config);
+    }
+    return { ...view, status: 'done', message: '配置完成，验收文件已取回本机并通过校验。', gpu: s.gpu, space: s.space, preview };
   });
   ipcMain.handle('remote:get', () => remotePayload());
   ipcMain.handle('remote:save', (_e, raw) => {
@@ -1265,7 +1324,12 @@ if (!app.requestSingleInstanceLock()) {
         startupNotice = `旧版本设置搬迁失败:${e.message}`;
       }
     }
+    const freshInstall = !SMOKE && !fs.existsSync(configFile);
     config = loadConfig(configFile);
+    if (freshInstall) {
+      config.cloudWelcome = 'pending';
+      saveConfig(configFile, config);
+    }
     runtime = createRuntime({ getConfig: () => config });
     workflowService = createWorkflowService({
       getTemplateDir: () => {
