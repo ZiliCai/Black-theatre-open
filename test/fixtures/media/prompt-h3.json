@@ -1,0 +1,585 @@
+{
+ "92": {
+  "inputs": {
+   "filename_prefix": "video/minimax-h3-demo",
+   "format": "auto",
+   "format.codec": "auto",
+   "codec": "auto",
+   "video": [
+    "130",
+    0
+   ]
+  },
+  "class_type": "SaveVideo",
+  "_meta": {
+   "title": "保存视频"
+  }
+ },
+ "115": {
+  "inputs": {
+   "aspect_ratio": "4:3 (Standard)",
+   "megapixels": 0.6,
+   "multiple": 32
+  },
+  "class_type": "ResolutionSelector",
+  "_meta": {
+   "title": "视频画幅"
+  }
+ },
+ "119": {
+  "inputs": {
+   "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "视频 VAE"
+  }
+ },
+ "120": {
+  "inputs": {
+   "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+  },
+  "class_type": "VAELoader",
+  "_meta": {
+   "title": "音频 VAE"
+  }
+ },
+ "121": {
+  "inputs": {
+   "samples": [
+    "125",
+    0
+   ],
+   "vae": [
+    "120",
+    0
+   ]
+  },
+  "class_type": "VAEDecodeAudio",
+  "_meta": {
+   "title": "音频解码"
+  }
+ },
+ "122": {
+  "inputs": {
+   "samples": [
+    "125",
+    0
+   ],
+   "vae": [
+    "119",
+    0
+   ]
+  },
+  "class_type": "VAEDecode",
+  "_meta": {
+   "title": "视频解码"
+  }
+ },
+ "123": {
+  "inputs": {
+   "sampler_name": "euler"
+  },
+  "class_type": "KSamplerSelect",
+  "_meta": {
+   "title": "采样器 · euler"
+  }
+ },
+ "124": {
+  "inputs": {
+   "scheduler": "beta",
+   "steps": [
+    "142",
+    0
+   ],
+   "denoise": 1.0,
+   "model": [
+    "141",
+    0
+   ]
+  },
+  "class_type": "BasicScheduler",
+  "_meta": {
+   "title": "调度器 · beta"
+  }
+ },
+ "125": {
+  "inputs": {
+   "noise": [
+    "129",
+    0
+   ],
+   "guider": [
+    "126",
+    0
+   ],
+   "sampler": [
+    "123",
+    0
+   ],
+   "sigmas": [
+    "124",
+    0
+   ],
+   "latent_image": [
+    "136",
+    1
+   ]
+  },
+  "class_type": "SamplerCustomAdvanced",
+  "_meta": {
+   "title": "采样"
+  }
+ },
+ "126": {
+  "inputs": {
+   "model": [
+    "270",
+    0
+   ],
+   "conditioning": [
+    "340",
+    0
+   ]
+  },
+  "class_type": "BasicGuider",
+  "_meta": {
+   "title": "引导"
+  }
+ },
+ "127": {
+  "inputs": {
+   "unet_name": "MiniMax-H3-Ref2VA-Q3_K_M.gguf"
+  },
+  "class_type": "UnetLoaderGGUF",
+  "_meta": {
+   "title": "H3 参考图转视频模型 · Ref2VA Q3_K_M"
+  }
+ },
+ "128": {
+  "inputs": {
+   "clip_name": "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+   "type": "minimax"
+  },
+  "class_type": "CLIPLoaderGGUF",
+  "_meta": {
+   "title": "H3 文本编码器 · Qwen3-VL 32B"
+  }
+ },
+ "129": {
+  "inputs": {
+   "noise_seed": 728888521730947
+  },
+  "class_type": "RandomNoise",
+  "_meta": {
+   "title": "随机种子"
+  }
+ },
+ "130": {
+  "inputs": {
+   "fps": 24.0,
+   "bit_depth": "auto",
+   "color_space": "sRGB",
+   "codec": "none",
+   "images": [
+    "343",
+    0
+   ],
+   "audio": [
+    "343",
+    1
+   ]
+  },
+  "class_type": "CreateVideo",
+  "_meta": {
+   "title": "合成视频"
+  }
+ },
+ "131": {
+  "inputs": {
+   "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+   "values.a": [
+    "132",
+    0
+   ]
+  },
+  "class_type": "ComfyMathExpression",
+  "_meta": {
+   "title": "帧数 = 17n+5"
+  }
+ },
+ "132": {
+  "inputs": {
+   "value": 8.0
+  },
+  "class_type": "PrimitiveFloat",
+  "_meta": {
+   "title": "视频时长（秒）"
+  }
+ },
+ "136": {
+  "inputs": {
+   "prompt": [
+    "138",
+    0
+   ],
+   "width": [
+    "115",
+    0
+   ],
+   "height": [
+    "115",
+    1
+   ],
+   "length": [
+    "131",
+    1
+   ],
+   "ref_image_size": "match",
+   "clip": [
+    "128",
+    0
+   ],
+   "vae": [
+    "119",
+    0
+   ],
+   "audio_vae": [
+    "120",
+    0
+   ],
+   "ref_images.ref_image_0": [
+    "231",
+    0
+   ],
+   "ref_images.ref_image_1": [
+    "242",
+    0
+   ],
+   "ref_images.ref_image_2": [
+    "243",
+    0
+   ],
+   "ref_images.ref_image_3": [
+    "244",
+    0
+   ]
+  },
+  "class_type": "MiniMaxH3ReferenceToVideo",
+  "_meta": {
+   "title": "参考图转视频（带参考图）"
+  }
+ },
+ "138": {
+  "inputs": {
+   "value": "subject_definitions:\n<Subject 1> is a test character from <Picture 1>.\nsummary:\n[reference generation] A short test clip of a person greeting a friend in a living room.\ndetailed_description:\n[Shot 1] A medium shot, slow push-in.\noverall_soundscape:\nQuiet room tone.\nnon_diegetic_music:\nN/A"
+  },
+  "class_type": "PrimitiveStringMultiline",
+  "_meta": {
+   "title": "视频提示词(先用【提示词优化-视频】生成,再粘贴到这里)"
+  }
+ },
+ "141": {
+  "inputs": {
+   "switch": [
+    "146",
+    0
+   ],
+   "on_false": [
+    "150",
+    0
+   ],
+   "on_true": [
+    "145",
+    0
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "模型开关（关=不加速）"
+  }
+ },
+ "142": {
+  "inputs": {
+   "switch": [
+    "146",
+    0
+   ],
+   "on_false": [
+    "143",
+    0
+   ],
+   "on_true": [
+    "144",
+    0
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "步数开关"
+  }
+ },
+ "143": {
+  "inputs": {
+   "value": 16
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "完整步数"
+  }
+ },
+ "144": {
+  "inputs": {
+   "value": 4
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "Turbo 步数"
+  }
+ },
+ "145": {
+  "inputs": {
+   "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+   "strength_model": 1.0,
+   "model": [
+    "150",
+    0
+   ]
+  },
+  "class_type": "LoraLoaderModelOnly",
+  "_meta": {
+   "title": "加速 LoRA · Turbo 4 步（可选）"
+  }
+ },
+ "146": {
+  "inputs": {
+   "value": false
+  },
+  "class_type": "PrimitiveBoolean",
+  "_meta": {
+   "title": "启用 Turbo 加速？"
+  }
+ },
+ "150": {
+  "inputs": {
+   "lora_name": "h3-realism-people-t2v-i2v-r2v.safetensors",
+   "strength_model": 1.0,
+   "model": [
+    "127",
+    0
+   ]
+  },
+  "class_type": "LoraLoaderModelOnly",
+  "_meta": {
+   "title": "写实 LoRA · 强度 1.0"
+  }
+ },
+ "231": {
+  "inputs": {
+   "image": "角色甲_00001_.png [output]",
+   "refresh": "refresh"
+  },
+  "class_type": "LoadImageOutput",
+  "_meta": {
+   "title": "参考图 1 · 必选 · 点箭头换图，右上刷新"
+  },
+  "is_changed": [
+   "afa33feca3c693beb823e07876221c66a50c2d6f9373d81f1a2a3f990a49e263"
+  ]
+ },
+ "232": {
+  "inputs": {
+   "image": "角色乙_00001_.png [output]",
+   "refresh": "refresh"
+  },
+  "class_type": "LoadImageOutput",
+  "_meta": {
+   "title": "参考图 2"
+  },
+  "is_changed": [
+   "c8b10776bf678e139342dc6b08c8b1550704d09401e78af9166eb312ceeab146"
+  ]
+ },
+ "242": {
+  "inputs": {
+   "switch": true,
+   "on_true": [
+    "232",
+    0
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "用上面的参考图 2 ？（关=不用）"
+  }
+ },
+ "243": {
+  "inputs": {
+   "switch": false
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "用上面的参考图 3 ？（关=不用）"
+  }
+ },
+ "244": {
+  "inputs": {
+   "switch": false
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "用上面的参考图 4 ？（关=不用）"
+  }
+ },
+ "270": {
+  "inputs": {
+   "max_resolution": 1024,
+   "jpeg_quality": 80,
+   "suppress_default_preview": true,
+   "preview_frames": 360,
+   "preview_fps": 12,
+   "tiny_vae": "taeh3.safetensors",
+   "model": [
+    "141",
+    0
+   ]
+  },
+  "class_type": "ModelPreviewOverrideKJ",
+  "_meta": {
+   "title": "采样实时预览"
+  }
+ },
+ "336": {
+  "inputs": {
+   "value": false
+  },
+  "class_type": "PrimitiveBoolean",
+  "_meta": {
+   "title": "接着上一段生成？（开=续写，关=单独生成）"
+  }
+ },
+ "337": {
+  "inputs": {
+   "latent_path": "h3_context",
+   "clip_index": 1
+  },
+  "class_type": "MiniMaxH3MotionContextLoadLatent",
+  "_meta": {
+   "title": "读取上一段 · clip_index = 从第几段接着做"
+  },
+  "is_changed": [
+   NaN
+  ]
+ },
+ "338": {
+  "inputs": {
+   "filename_prefix": "h3_context/clip",
+   "clip_index": 1,
+   "latent": [
+    "125",
+    0
+   ]
+  },
+  "class_type": "MiniMaxH3MotionContextSaveLatent",
+  "_meta": {
+   "title": "保存本段 · clip_index = 这是第几段"
+  }
+ },
+ "339": {
+  "inputs": {
+   "context_length": "22",
+   "audio_context_length": 24,
+   "conditioning": [
+    "136",
+    0
+   ],
+   "vae": [
+    "119",
+    0
+   ],
+   "latent": [
+    "136",
+    1
+   ],
+   "context_latent": [
+    "337",
+    0
+   ]
+  },
+  "class_type": "MiniMaxH3MotionContext",
+  "_meta": {
+   "title": "H3 接续上下文（把上一段结尾固定在开头）"
+  }
+ },
+ "340": {
+  "inputs": {
+   "switch": [
+    "336",
+    0
+   ],
+   "on_false": [
+    "136",
+    0
+   ],
+   "on_true": [
+    "339",
+    0
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "条件开关（开=用接续条件）"
+  }
+ },
+ "341": {
+  "inputs": {
+   "switch": [
+    "336",
+    0
+   ],
+   "on_false": [
+    "342",
+    0
+   ],
+   "on_true": [
+    "339",
+    1
+   ]
+  },
+  "class_type": "ComfySwitchNode",
+  "_meta": {
+   "title": "裁剪帧数开关（关=不裁）"
+  }
+ },
+ "342": {
+  "inputs": {
+   "value": 0
+  },
+  "class_type": "PrimitiveInt",
+  "_meta": {
+   "title": "不裁剪 = 0"
+  }
+ },
+ "343": {
+  "inputs": {
+   "trim_frames": [
+    "341",
+    0
+   ],
+   "fps": 24.0,
+   "match_tail": true,
+   "images": [
+    "122",
+    0
+   ],
+   "audio": [
+    "121",
+    0
+   ]
+  },
+  "class_type": "MiniMaxH3MotionContextTrim",
+  "_meta": {
+   "title": "裁掉开头重复帧（续写必须，要和合成视频的帧率一致）"
+  }
+ }
+}

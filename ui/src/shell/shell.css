@@ -1,0 +1,58 @@
+.app { height: 100%; display: grid; grid-template-rows: var(--top-h) auto 1fr; grid-template-columns: var(--nav-w) 1fr; }
+.app > .top { grid-column: 1 / -1; }
+.app > .banner { grid-column: 1 / -1; }
+.app > .nav { grid-row: 3; }
+.app > .page { grid-row: 3; grid-column: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* ---------- top bar ---------- */
+.top { display: flex; align-items: center; gap: var(--s3); padding: 0 150px 0 var(--s4); background: var(--panel); border-bottom: 1px solid var(--line); }
+.top .logo { white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; gap: var(--s2); font-weight: 700; font-size: var(--fs-md); letter-spacing: .5px; }
+.top .logo img { width: 24px; height: 24px; border-radius: 6px; }
+.top .crumbs { display: flex; align-items: center; gap: 6px; color: var(--sub); min-width: 0; }
+.top .crumbs b { color: var(--text); font-weight: 500; }
+.top .crumbs .sep { color: var(--dim); }
+.top .slot { display: flex; align-items: center; gap: var(--s2); }
+.top .sp { flex: 1; }
+
+/* ---------- dropdown menus in the top bar ---------- */
+.menu-wrap { position: relative; }
+.menu { position: absolute; top: calc(100% + 6px); right: 0; min-width: 240px; z-index: 40; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r3); box-shadow: 0 16px 40px rgba(0, 0, 0, .5);
+  display: flex; flex-direction: column; gap: 2px; }
+.menu.left { right: auto; left: 0; }
+.menu > button, .menu .item { display: flex; align-items: center; gap: var(--s2); height: 34px; padding: 0 var(--s3); border-radius: var(--r2); color: var(--text); font-size: var(--fs-md); text-align: left; }
+.menu > button:hover:not(:disabled) { background: var(--panel-2); }
+.menu > button:disabled { color: var(--dim); }
+.menu > button.on { color: var(--acc); }
+.menu .hr { height: 1px; background: var(--line); margin: 4px 2px; }
+.menu .head { padding: 6px var(--s3) 4px; font-size: var(--fs-xs); color: var(--dim); }
+.menu .note { padding: 6px var(--s3); font-size: var(--fs-sm); color: var(--sub); line-height: 1.6; }
+
+.project-btn { height: var(--h-md); display: inline-flex; align-items: center; gap: var(--s2); padding: 0 var(--s3); border-radius: var(--r2);
+  background: var(--panel-2); border: 1px solid var(--line); max-width: 260px; }
+.project-btn small { color: var(--dim); font-size: var(--fs-xs); }
+.project-btn b { font-weight: 500; }
+
+/* ---------- queue ---------- */
+.queue-menu { width: 360px; }
+.queue-row { display: grid; grid-template-columns: 1fr auto; gap: 2px var(--s2); align-items: center; padding: 8px var(--s3); border-radius: var(--r2); }
+.queue-row:hover { background: var(--panel-2); }
+.queue-row .what { font-size: var(--fs-md); }
+.queue-row .state { grid-column: 1; font-size: var(--fs-xs); color: var(--sub); }
+.queue-row .bar { grid-column: 1 / -1; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+.queue-row .bar i { display: block; height: 100%; background: var(--acc); }
+.queue-row .c-btn { grid-row: 1 / span 2; grid-column: 2; }
+
+/* ---------- nav rail ---------- */
+.nav { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; padding: 10px 0; gap: 4px; }
+.nav button { width: 46px; height: 50px; border-radius: var(--r3); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--dim); font-size: var(--fs-xs); }
+.nav button:hover { color: var(--sub); background: var(--panel-2); }
+.nav button.on { background: var(--panel-2); color: var(--acc); }
+.nav .grow { flex: 1; }
+
+/* ---------- alert banner ---------- */
+.banner { display: flex; align-items: center; gap: var(--s3); padding: 8px var(--s4); background: #2a1717; border-bottom: 1px solid #4a2222; font-size: var(--fs-md); }
+.banner .t { font-weight: 600; color: var(--bad); }
+.banner .s { color: var(--sub); flex: 1; min-width: 0; }
+.banner.info { background: #1d2230; border-bottom-color: #2c3550; }
+.banner.info .t { color: var(--text); }

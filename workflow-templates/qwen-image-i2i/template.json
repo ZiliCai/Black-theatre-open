@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 2,
+  "id": "qwen-image-i2i",
+  "name": "Qwen-Image 2.1 · 图生图",
+  "version": "1.0.0",
+  "kind": "image",
+  "family": "qwen-image",
+  "defaults": {
+    "aspect": "source",
+    "seedMode": "random"
+  },
+  "limits": {
+    "promptMaxChars": 20000
+  },
+  "outputs": {
+    "imagePrefix": {
+      "node": "8",
+      "input": "filename_prefix"
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node": "4",
+      "input": "prompt"
+    },
+    "seed": {
+      "node": "6",
+      "input": "seed"
+    },
+    "image": {
+      "node": "9",
+      "input": "image"
+    }
+  },
+  "resources": [
+    "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+    "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+    "vae/qwen_image_2.1_vae_bf16.safetensors"
+  ],
+  "aspects": [
+    {
+      "id": "source",
+      "label": "跟随基于的图",
+      "w": 0,
+      "h": 0
+    }
+  ],
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:3ec87fd020b8744d51ef049ab3c23e79523fa261d281ef0dcc47316a911829f3"
+}

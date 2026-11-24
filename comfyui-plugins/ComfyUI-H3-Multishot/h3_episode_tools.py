@@ -1,0 +1,757 @@
+# -*- coding: utf-8 -*-
+"""Episode-assembly helpers for the two-stage reference pipeline.
+
+Stage A renders block 1 with MiniMaxH3ReferenceToVideo (identity in pixels),
+stage B chains blocks 2..N through H3MultishotSampler from stage A's last
+frame, and the segments are joined in-graph. These three nodes are the glue:
+
+  H3EpisodeSplit  - one pasted episode script -> stage A prompt + stage B script
+  H3LastFrame    - stage A frames -> the single chain frame for start_image
+  H3ConcatAV     - stage A + stage B frames/audio -> one episode
+"""
+import json
+import re
+
+_BLOCK_SPLIT = re.compile(r"(?m)^---\s*$")
+
+
+class H3EpisodeSplit:
+    """Split an episode script into the stage A prompt and stage B envelope.
+
+    Accepts either the one-line JSON envelope {"prompts": [...]} (the LPFF
+    entry format) or raw blocks separated by --- lines. `bindings` is
+    prepended to block 1 only - reference-image identity lines like
+    "<Picture 1>, <Picture 2> are the same person (Rae)." belong with the
+    ref2va stage, never in the I2V chain.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "script": ("STRING", {"multiline": True, "default": "", "tooltip":
+                "The whole episode: either the one-line JSON envelope "
+                '{"prompts": [...]} or raw blocks separated by --- lines.'}),
+            "bindings": ("STRING", {"multiline": True, "default": "", "tooltip":
+                "<Picture N> identity lines, prepended to block 1 only. "
+                "Keep in sync with which reference images are unmuted."}),
+        }}
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("block1_prompt", "rest_script", "info")
+    FUNCTION = "split"
+    CATEGORY = "video/minimax"
+
+    def split(self, script, bindings):
+        text = (script or "").strip()
+        if not text:
+            raise ValueError("[H3EpisodeSplit] script is empty - paste the "
+                             "episode envelope or --- separated blocks.")
+        if text.startswith("{"):
+            try:
+                blocks = json.loads(text)["prompts"]
+            except Exception as e:
+                raise ValueError(f"[H3EpisodeSplit] script looks like JSON but "
+                                 f"failed to parse: {e}")
+        else:
+            blocks = [b.strip() for b in _BLOCK_SPLIT.split(text) if b.strip()]
+        blocks = [str(b).strip() for b in blocks if str(b).strip()]
+        b = (bindings or "").strip()
+        block1 = (b + "\n" + blocks[0]) if b else blocks[0]
+        rest = json.dumps({"prompts": blocks[1:]}, ensure_ascii=False)
+        if len(blocks) < 2:
+            # Single-block scene: stage A alone is the whole render. Do not
+            # raise - a one-shot scene is a legitimate thing to want, and the
+            # graph supports it as soon as stage B is muted (H3ConcatAV takes
+            # its B inputs as optional and passes A straight through).
+            info = ("1 block -> single-shot render. MUTE the stage B group "
+                    "(sampler + last-frame) with Ctrl-M; H3ConcatAV then "
+                    "passes stage A through unchanged. ~15s total.")
+            print(f"[H3EpisodeSplit] {info}", flush=True)
+            return (block1, rest, info)
+        info = (f"{len(blocks)} blocks -> stage A renders block 1, "
+                f"stage B chains {len(blocks) - 1} block(s) "
+                f"(~{len(blocks) * 15.1:.0f}s total at 362f/block)")
+        return (block1, rest, info)
+
+
+class H3LastFrame:
+    """Return the last frame of a batch - the I2V chain frame."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"images": ("IMAGE", {"tooltip":
+            "Stage A frames; the final frame seeds stage B's start_image."})}}
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "take"
+    CATEGORY = "image/batch"
+
+    def take(self, images):
+        return (images[-1:],)
+
+
+class H3ConcatAV:
+    """Concatenate two video+audio segments into one continuous take.
+
+    match_b (default on): measure the seam and match segment B's texture to
+    segment A. The two-stage chain renders A on ref2va (soft - reference
+    conditioning pulls the image toward the refs' texture) and B on fl2va
+    (crisper, higher micro-contrast); measured on a real take the seam was a
+    +119..174% Laplacian sharpness step plus +5% luma - a visible focus
+    snap. Steps parity cannot equalize two checkpoints, so B gets an
+    auto-tuned gaussian (sigma searched until B's Laplacian lands on A's)
+    and a luma affine, in float tensors before any encode. A's softer look
+    IS the intended consumer-camcorder texture, so matching downward is the
+    correct direction. Skips itself when the seam is already within 15%.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images_a": ("IMAGE",), "audio_a": ("AUDIO",),
+        }, "optional": {
+            "images_b": ("IMAGE", {"tooltip":
+                "Stage B. Leave unconnected, or MUTE the stage B group, for a "
+                "single-shot render - stage A then passes through unchanged."}),
+            "audio_b": ("AUDIO",),
+            "match_b": (["match_to_a", "off"], {"default": "match_to_a",
+                "tooltip": "Match segment B's sharpness/tone to segment A "
+                "at the seam (the two stages render on different "
+                "checkpoints with different texture character)."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_NAMES = ("images", "audio")
+    FUNCTION = "concat"
+    CATEGORY = "video/minimax"
+
+    @staticmethod
+    def _gray(x):
+        return (0.299 * x[..., 0] + 0.587 * x[..., 1] + 0.114 * x[..., 2])
+
+    @classmethod
+    def _lap_var(cls, x):
+        import torch
+        g = cls._gray(x).unsqueeze(1)
+        k = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]],
+                         dtype=g.dtype, device=g.device).view(1, 1, 3, 3)
+        return float(torch.nn.functional.conv2d(g, k, padding=1).var())
+
+    @staticmethod
+    def _gauss(x, sigma):
+        """Separable gaussian on [T,H,W,C], returns same shape."""
+        import math
+        import torch
+        r = max(1, int(math.ceil(3 * sigma)))
+        t = torch.arange(-r, r + 1, dtype=x.dtype, device=x.device)
+        k = torch.exp(-(t ** 2) / (2 * sigma * sigma))
+        k = (k / k.sum()).view(1, 1, 1, -1)
+        v = x.permute(0, 3, 1, 2)                       # [T,C,H,W]
+        c = v.shape[1]
+        kh = k.expand(c, 1, 1, k.shape[-1])
+        v = torch.nn.functional.conv2d(v, kh, padding=(0, r), groups=c)
+        kv = k.view(1, 1, -1, 1).expand(c, 1, k.shape[-1], 1)
+        v = torch.nn.functional.conv2d(v, kv, padding=(r, 0), groups=c)
+        return v.permute(0, 2, 3, 1)
+
+    def _match(self, images_a, images_b):
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        # WINDOWED: A's tail vs B's HEAD - those are the two sides the viewer
+        # actually sees touching. Sampling across all of B (the old behaviour)
+        # measures B's internal average, which sits above its head because the
+        # chain ratchets, so the head ends up over-blurred (measured -50..-72%
+        # at the seam - a softening snap instead of a match).
+        nwin = 24
+        na = images_a[-min(nwin, images_a.shape[0]):].to(dev)
+        nb = images_b[:min(nwin, images_b.shape[0])].to(dev)
+        lap_a, lap_b = self._lap_var(na), self._lap_var(nb)
+        ga, gb = self._gray(na), self._gray(nb)
+        ma, sa = float(ga.mean()), float(ga.std())
+        mb, sb = float(gb.mean()), float(gb.std())
+        sigma = 0.0
+        if lap_b > lap_a * 1.15:
+            ref = nb[len(nb) // 2:len(nb) // 2 + 1]
+            # CLAMPED: only accept a sigma whose result stays at or above
+            # 0.9 x A's level. Undershooting the target leaves a small step;
+            # overshooting produces the far more visible softening snap.
+            floor = lap_a * 0.9
+            best = (float("inf"), 0.0)
+            s = 0.05
+            while s <= 1.6 + 1e-9:
+                got = self._lap_var(self._gauss(ref, s))
+                if got >= floor:
+                    d = abs(got - lap_a)
+                    if d < best[0]:
+                        best = (d, s)
+                s += 0.05
+            sigma = best[1]
+        gain = max(0.85, min(1.15, sa / max(sb, 1e-6)))
+        off = ma - mb * gain
+        if sigma == 0.0 and abs(off) < 0.006 and abs(gain - 1) < 0.02:
+            print(f"[H3ConcatAV] seam already matched (sharp "
+                  f"{lap_b / max(lap_a, 1e-9):+.0%} vs A) - no-op", flush=True)
+            return images_b
+        out = torch.empty_like(images_b)
+        for i in range(0, images_b.shape[0], 32):
+            ch = images_b[i:i + 32].to(dev)
+            if sigma > 0:
+                ch = self._gauss(ch, sigma)
+            ch = (ch * gain + off).clamp(0, 1)
+            out[i:i + 32] = ch.to(images_b.device)
+        print(f"[H3ConcatAV] matched B to A: sigma {sigma:.2f}, gain "
+              f"{gain:.3f}, offset {off:+.4f} (sharp was "
+              f"{lap_b / max(lap_a, 1e-9):+.0%} vs A)", flush=True)
+        return out
+
+    def concat(self, images_a, audio_a, images_b=None, audio_b=None,
+               match_b="match_to_a"):
+        import torch
+        if images_b is None or audio_b is None:
+            # Single-shot render: stage B is muted, so there is nothing to
+            # join and stage A IS the finished take. Pass it through rather
+            # than failing - a one-block scene is a legitimate thing to want.
+            print("[H3ConcatAV] stage B absent (muted) - passing stage A "
+                  "through unchanged, single-shot render.", flush=True)
+            return (images_a, audio_a)
+        if tuple(images_a.shape[1:3]) != tuple(images_b.shape[1:3]):
+            raise ValueError(
+                f"[H3ConcatAV] frame sizes differ: A "
+                f"{tuple(images_a.shape[1:3])} vs B "
+                f"{tuple(images_b.shape[1:3])} - both stages must render at "
+                "the same width/height.")
+        if match_b == "match_to_a":
+            images_b = self._match(images_a, images_b)
+        images = torch.cat((images_a, images_b), dim=0)
+        wa, wb = audio_a["waveform"], audio_b["waveform"]
+        sa = int(audio_a["sample_rate"])
+        if sa != int(audio_b["sample_rate"]):
+            raise ValueError(f"[H3ConcatAV] sample rates differ: {sa} vs "
+                             f"{int(audio_b['sample_rate'])}")
+        if wa.shape[1] != wb.shape[1]:
+            # mono/stereo mismatch: upmix the narrower side
+            c = max(wa.shape[1], wb.shape[1])
+            wa = wa.expand(-1, c, -1) if wa.shape[1] == 1 else wa
+            wb = wb.expand(-1, c, -1) if wb.shape[1] == 1 else wb
+        # 40ms equal-power crossfade at the seam: the two stages are sampled
+        # independently, so a butt-join puts a step discontinuity in the
+        # waveform that reads as a click (confirmed by two independent audio
+        # reviewers at the stage A/B boundary).
+        k = min(int(sa * 0.04), wa.shape[-1], wb.shape[-1])
+        if k >= 8:
+            t = torch.linspace(0, 1, k, dtype=wa.dtype, device=wa.device)
+            fade_out = torch.cos(t * 3.14159265 / 2)
+            fade_in = torch.sin(t * 3.14159265 / 2)
+            seam = wa[..., -k:] * fade_out + wb[..., :k] * fade_in
+            audio = {"waveform": torch.cat((wa[..., :-k], seam, wb[..., k:]),
+                                           dim=-1), "sample_rate": sa}
+        else:
+            audio = {"waveform": torch.cat((wa, wb), dim=-1), "sample_rate": sa}
+        return (images, audio)
+
+
+class H3AutoRefs:
+    """Auto-select reference images per character from folders.
+
+    The RiftCast Studio pattern (JoyEcho_RefPicker) adapted to ref2va: a refs
+    root holds one subfolder per character; the prompt's descriptive prose is
+    scanned for folder names as whole words (dialogue is stripped first, so a
+    character merely TALKED ABOUT never matches); each matched character
+    contributes up to max_per_character images, in first-mention order, up to
+    the model's 9-slot cap; and the matching <Picture N> identity bindings are
+    generated and prepended to the prompt automatically.
+    """
+
+    MAX_SLOTS = 9
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "prompt_text": ("STRING", {"forceInput": True, "tooltip":
+                "Block-1 text; scanned for character folder names."}),
+            "max_per_character": ("INT", {"default": 3, "min": 1, "max": 9,
+                "tooltip": "Images per matched character (sorted order; "
+                "front/three-quarter/profile sets hold identity best)."}),
+        }, "optional": {
+            "refs_root": ("STRING", {"default": "", "tooltip":
+                "Folder holding one subfolder per character. Relative paths "
+                "resolve under input/. Empty = input/h3_refs/."}),
+            "characters": ("STRING", {"default": "", "tooltip":
+                "Explicit comma list of character folders - overrides the "
+                "prompt scan entirely when set."}),
+            "overrides": ("STRING", {"default": "", "tooltip":
+                "Folder remaps, e.g. 'rae=rae_night' to swap a "
+                "character's ref set for specific scenes. Comma-separated."}),
+            "on_no_match": (["error", "no_reference"], {"default": "error",
+                "tooltip": "error = stop the run when no character matches "
+                "(an identity render without refs is a wasted render)."}),
+        }}
+
+    RETURN_TYPES = tuple(["IMAGE"] * 9 + ["STRING", "STRING"])
+    RETURN_NAMES = tuple([f"ref_{i+1}" for i in range(9)]
+                         + ["prompt_out", "report"])
+    FUNCTION = "pick"
+    CATEGORY = "video/minimax"
+
+    @staticmethod
+    def _root(refs_root):
+        import os
+        import folder_paths
+        r = (refs_root or "").strip() or "h3_refs"
+        if not os.path.isabs(r):
+            r = os.path.join(folder_paths.get_input_directory(), r)
+        return r
+
+    @classmethod
+    def IS_CHANGED(cls, prompt_text, max_per_character, refs_root="",
+                   characters="", overrides="", on_no_match="error"):
+        import os
+        root = cls._root(refs_root)
+        sig = [str(hash(prompt_text or "")), str(max_per_character),
+               characters, overrides, root]
+        try:
+            for d in sorted(os.listdir(root)):
+                p = os.path.join(root, d)
+                if os.path.isdir(p):
+                    fs = sorted(os.listdir(p))
+                    sig.append(f"{d}:{len(fs)}")
+        except OSError:
+            pass
+        return "|".join(sig)
+
+    def pick(self, prompt_text, max_per_character, refs_root="",
+             characters="", overrides="", on_no_match="error"):
+        import os
+        import numpy as np
+        import torch
+        from PIL import Image, ImageOps
+
+        root = self._root(refs_root)
+        try:
+            dirs = sorted(d for d in os.listdir(root)
+                          if os.path.isdir(os.path.join(root, d)))
+        except OSError:
+            dirs = []
+        remap = {}
+        for pair in (overrides or "").split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                remap[k.strip().lower()] = v.strip()
+
+        if (characters or "").strip():
+            matched = [c.strip() for c in characters.split(",") if c.strip()]
+        else:
+            # strip dialogue so absent characters spoken about never match
+            # (same scrub as JoyEcho_RefPicker, field-proven)
+            scrub = prompt_text or ""
+            try:
+                _d = json.loads(scrub)
+                arr = _d.get("prompts") if isinstance(_d, dict) else None
+                if isinstance(arr, list) and arr:
+                    scrub = " ".join(str(x) for x in arr)
+            except (ValueError, TypeError):
+                pass
+            scrub = re.sub(r"<d>.*?</d>", " ", scrub, flags=re.S)
+            scrub = re.sub(r'\\"(?:[^"\\]|\\.)*?\\"', " ", scrub)
+            scrub = re.sub(r'"(?:[^"\\]|\\.)*?"', " ", scrub)
+            scrub = re.sub(r"says,\s*'(?:[^'])*?'", " ", scrub)
+            low = scrub.lower()
+            found = []
+            for d in dirs:
+                m = re.search(r"\b" + re.escape(d.lower()) + r"\b", low)
+                if m:
+                    found.append((m.start(), d))
+            found.sort()
+            matched = [d for _, d in found[:3]]
+
+        images, binds, lines, pic = [], [], [], 1
+        for name in matched:
+            folder = remap.get(name.lower(), name)
+            fdir = os.path.join(root, folder)
+            try:
+                files = sorted(f for f in os.listdir(fdir) if
+                               f.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))
+            except OSError:
+                files = []
+            if not files:
+                print(f"[H3AutoRefs] {folder}/ matched but has no images; "
+                      "skipping.", flush=True)
+                continue
+            nums = []
+            for f in files[:max_per_character]:
+                if len(images) >= self.MAX_SLOTS:
+                    break
+                img = Image.open(os.path.join(fdir, f))
+                img = ImageOps.exif_transpose(img).convert("RGB")
+                arr = np.asarray(img).astype(np.float32) / 255.0
+                images.append(torch.from_numpy(arr)[None, ...])
+                nums.append(f"<Picture {pic}>")
+                lines.append(f"{folder}/{f} -> <Picture {pic}>")
+                pic += 1
+            if nums:
+                disp = name.replace("_", " ").title()
+                binds.append(f"{', '.join(nums)} "
+                             f"{'is' if len(nums) == 1 else 'are'} "
+                             f"the same person ({disp}).")
+
+        if not images:
+            msg = (f"[H3AutoRefs] no character matched. Folders under "
+                   f"{root}: {dirs or '(none)'}")
+            if on_no_match == "error":
+                raise ValueError(msg + " - name the character in the prose, "
+                                 "set `characters`, or switch on_no_match.")
+            print(msg + " - continuing WITHOUT references.", flush=True)
+            return tuple([None] * self.MAX_SLOTS
+                         + [prompt_text, "(no references)"])
+
+        prompt_out = "\n".join(binds) + "\n" + (prompt_text or "")
+        report = f"{len(images)} ref(s): " + "; ".join(lines)
+        print(f"[H3AutoRefs] {report}", flush=True)
+        out = images + [None] * (self.MAX_SLOTS - len(images))
+        return tuple(out + [prompt_out, report])
+
+
+class H3RefBatch:
+    """Adapt JoyEcho_RefPicker's output to MiniMaxH3ReferenceToVideo.
+
+    The RefPicker returns one IMAGE batch (one frame per picked reference)
+    plus a `picked_path` string ("path; path; ..."). H3's reference node
+    wants SEPARATE ref_image_N inputs and <Picture N> identity bindings in
+    the prompt. This node splits the batch into up to 9 slots, dedupes the
+    re-entry duplicates the picker schedules for LTX (meaningless for
+    ref2va - all refs bind at t=0), derives character names from each
+    path's parent folder, and prepends the binding lines to the prompt.
+    """
+
+    MAX_SLOTS = 9
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "prompt": ("STRING", {"forceInput": True}),
+        }, "optional": {
+            "reference_image": ("IMAGE",),
+            "picked_path": ("STRING", {"forceInput": True, "default": ""}),
+        }}
+
+    RETURN_TYPES = tuple(["IMAGE"] * 9 + ["STRING", "STRING"])
+    RETURN_NAMES = tuple([f"ref_{i+1}" for i in range(9)]
+                         + ["prompt_out", "report"])
+    FUNCTION = "adapt"
+    CATEGORY = "video/minimax"
+
+    def adapt(self, prompt, reference_image=None, picked_path=""):
+        import os
+        if reference_image is None or (picked_path or "").startswith("("):
+            print("[H3RefBatch] no references from picker; prompt passes "
+                  "through unchanged.", flush=True)
+            return tuple([None] * self.MAX_SLOTS + [prompt, "(no references)"])
+
+        paths = [p.strip() for p in (picked_path or "").split(";") if p.strip()]
+        frames = [reference_image[i:i+1] for i in range(reference_image.shape[0])]
+        # dedupe the picker's re-entry duplicates (same path repeated)
+        keep, seen = [], set()
+        for i, fr in enumerate(frames):
+            p = paths[i] if i < len(paths) else f"(slot {i})"
+            if p in seen:
+                continue
+            seen.add(p)
+            keep.append((fr, p))
+        keep = keep[:self.MAX_SLOTS]
+
+        binds, lines, per_char, order = [], [], {}, []
+        for idx, (fr, p) in enumerate(keep, start=1):
+            char = os.path.basename(os.path.dirname(p)) or "character"
+            if char not in per_char:
+                per_char[char] = []
+                order.append(char)
+            per_char[char].append(idx)
+            lines.append(f"{char}/{os.path.basename(p)} -> <Picture {idx}>")
+        for char in order:
+            nums = [f"<Picture {i}>" for i in per_char[char]]
+            # variant folders (rae_night, rae-wet) are the SAME
+            # person - bind the base name, i.e. the first separator token
+            disp = re.split(r"[-_]", char)[0].title()
+            binds.append(f"{', '.join(nums)} "
+                         f"{'is' if len(nums) == 1 else 'are'} "
+                         f"the same person ({disp}).")
+
+        prompt_out = "\n".join(binds) + "\n" + (prompt or "")
+        report = f"{len(keep)} ref(s): " + "; ".join(lines)
+        print(f"[H3RefBatch] {report}", flush=True)
+        out = [fr for fr, _ in keep] + [None] * (self.MAX_SLOTS - len(keep))
+        return tuple(out + [prompt_out, report])
+
+
+class H3StudioControls:
+    """ONE set of widgets that drives BOTH stages of the studio graph.
+
+    The two-stage chain has duplicated settings (stage A's conditioning node
+    and stage B's multishot sampler each carry width/height/frames/steps/
+    sampler/scheduler). Editing one and forgetting the other produces
+    mismatched renders that fail at the concat - or worse, succeed at two
+    different qualities. This node is the single source: wire its outputs to
+    both stages and there is exactly one place to change anything.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "width": ("INT", {"default": 768, "min": 32, "max": 4096,
+                              "step": 32}),
+            "height": ("INT", {"default": 1344, "min": 32, "max": 4096,
+                               "step": 32}),
+            "frames_per_shot": ("INT", {
+                "default": 362, "min": 5, "max": 481, "step": 17,
+                "tooltip": "H3's 17k+5 grid at 24fps. 362 = ~15.1s, the "
+                           "trained max. Drives stage A's length AND stage "
+                           "B's per-shot length."}),
+            "steps": ("INT", {"default": 12, "min": 1, "max": 50}),
+            "sampler_name": (_sampler_names_sc(), {"default": "euler"}),
+            "scheduler": (_scheduler_names_sc(), {"default": "beta"}),
+        }, "optional": {
+            # NEW WIDGETS APPEND LAST, and new OUTPUTS append last too -
+            # inserting either above shifts every saved workflow.
+            "shot_count": ("INT", {
+                "default": 0, "min": 0, "max": 30,
+                "tooltip": "How many shots the scene is. 0 = one shot per "
+                           "prompt in the script (and lets the prompt writer "
+                           "decide). Wire this to BOTH the sampler's "
+                           "shot_count and the writer's num_shots so they "
+                           "cannot disagree."}),
+            "use_file_prompts": ("BOOLEAN", {
+                "default": False,
+                "label_on": "file / prompt set",
+                "label_off": "manual entry",
+                "tooltip": "Drives the prompt-source switch. OFF = type the "
+                           "scene yourself; ON = pull it from the prompt-set "
+                           "file or folder. Wire to an H3 Any Switch."}),
+        }}
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "STRING", "STRING",
+                    "INT", "BOOLEAN")
+    RETURN_NAMES = ("width", "height", "frames_per_shot", "steps",
+                    "sampler_name", "scheduler",
+                    "shot_count", "use_file_prompts")
+    FUNCTION = "emit"
+    CATEGORY = "video/minimax"
+
+    def emit(self, width, height, frames_per_shot, steps,
+             sampler_name, scheduler, shot_count=0,
+             use_file_prompts=False):
+        print(f"[H3StudioControls] {width}x{height}, {frames_per_shot}f/shot, "
+              f"{steps} steps, {sampler_name}/{scheduler}, "
+              f"shots={'auto' if not shot_count else shot_count}, "
+              f"prompts={'file' if use_file_prompts else 'manual'}",
+              flush=True)
+        return (width, height, frames_per_shot, steps,
+                sampler_name, scheduler, shot_count, use_file_prompts)
+
+
+def _sampler_names_sc():
+    try:
+        import comfy.samplers
+        return comfy.samplers.KSampler.SAMPLERS
+    except Exception:
+        return ["euler", "res_multistep", "res_2s"]
+
+
+def _scheduler_names_sc():
+    try:
+        import comfy.samplers
+        return comfy.samplers.KSampler.SCHEDULERS
+    except Exception:
+        return ["beta", "normal", "simple", "beta57"]
+
+
+
+
+class H3SamplerByName:
+    """STRING -> SAMPLER. Lets one master widget drive samplers everywhere:
+    combo-to-combo LINKS are rejected by the frontend's type check, but a
+    STRING output into this adapter gives core SamplerCustomAdvanced a real
+    SAMPLER object."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"sampler_name": ("STRING", {
+            "forceInput": True,
+            "tooltip": "e.g. euler / res_multistep / res_2s - any name "
+                       "KSamplerSelect would offer."})}}
+
+    RETURN_TYPES = ("SAMPLER",)
+    FUNCTION = "get"
+    CATEGORY = "video/minimax"
+
+    def get(self, sampler_name):
+        import comfy.samplers
+        name = (sampler_name or "").strip()
+        try:
+            return (comfy.samplers.sampler_object(name),)
+        except Exception:
+            raise ValueError(
+                "[H3SamplerByName] unknown sampler %r. Valid: %s"
+                % (name, ", ".join(comfy.samplers.KSampler.SAMPLERS[:20])))
+
+
+class H3SigmasByName:
+    """model + STRING scheduler + steps -> SIGMAS (BasicScheduler with the
+    scheduler chosen by a linked string instead of a per-node combo)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "scheduler": ("STRING", {"forceInput": True}),
+            "steps": ("INT", {"default": 12, "min": 1, "max": 100,
+                              "forceInput": True}),
+            "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+        }}
+
+    RETURN_TYPES = ("SIGMAS",)
+    FUNCTION = "get"
+    CATEGORY = "video/minimax"
+
+    def get(self, model, scheduler, steps, denoise=1.0):
+        from comfy_extras import nodes_custom_sampler as ncs
+        name = (scheduler or "").strip()
+        return (ncs.BasicScheduler().get_sigmas(model, name, steps, denoise)[0],)
+
+
+NODE_CLASS_MAPPINGS = {
+    "H3EpisodeSplit": H3EpisodeSplit,
+    "H3LastFrame": H3LastFrame,
+    "H3ConcatAV": H3ConcatAV,
+    "H3AutoRefs": H3AutoRefs,
+    "H3RefBatch": H3RefBatch,
+    "H3StudioControls": H3StudioControls,
+    "H3SamplerByName": H3SamplerByName,
+    "H3SigmasByName": H3SigmasByName,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "H3EpisodeSplit": "H3 Episode Split (stage A + B)",
+    "H3LastFrame": "H3 Last Frame",
+    "H3ConcatAV": "H3 Concat A/V",
+    "H3AutoRefs": "H3 Auto Refs (folders, by prompt)",
+    "H3RefBatch": "H3 Ref Batch (RefPicker -> ref slots)",
+    "H3StudioControls": "H3 Studio Controls (one source, both stages)",
+    "H3SamplerByName": "H3 Sampler by Name (STRING -> SAMPLER)",
+    "H3SigmasByName": "H3 Sigmas by Name (STRING -> SIGMAS)",
+}
+
+
+class H3IntScale:
+    """INT scaler for derived resolutions: value / divide_by, snapped to a multiple.
+
+    Built for the TESTLAB two-pass upscale: pass-1 renders at master/1.5 and the
+    latent upscaler's x1.5 lands back exactly on the master resolution, so the
+    ConcatAV frame-size guard stays happy. Keep master width/height divisible by
+    (multiple * divide_by) - 48 for the defaults - or the round trip drifts.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "value": ("INT", {"forceInput": True}),
+            "divide_by": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 16.0, "step": 0.05}),
+            "multiple": ("INT", {"default": 32, "min": 1, "max": 256}),
+        }}
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "scale"
+    CATEGORY = "H3/episode"
+
+    def scale(self, value, divide_by=1.5, multiple=32):
+        out = max(multiple, int(round(value / divide_by / multiple)) * multiple)
+        return (out,)
+
+NODE_CLASS_MAPPINGS["H3IntScale"] = H3IntScale
+NODE_DISPLAY_NAME_MAPPINGS["H3IntScale"] = "H3 Int Scale (divide + snap)"
+
+
+class _H3AnyT(str):
+    """Wildcard socket type: compares unequal to nothing, so any link is accepted."""
+    def __ne__(self, other):
+        return False
+
+_h3_any = _H3AnyT("*")
+
+
+class H3AnySwitch:
+    """Lazy A/B switch: only the branch the boolean selects is ever executed.
+
+    The unselected branch's upstream nodes are skipped entirely (ComfyUI lazy
+    inputs), so a switched-off feature costs zero compute and zero VRAM.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"use_on": ("BOOLEAN", {"forceInput": True})},
+            "optional": {
+                "off_path": (_h3_any, {"lazy": True}),
+                "on_path": (_h3_any, {"lazy": True}),
+            },
+        }
+
+    RETURN_TYPES = (_h3_any,)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "pick"
+    CATEGORY = "H3/episode"
+
+    def check_lazy_status(self, use_on, off_path=None, on_path=None):
+        return ["on_path" if use_on else "off_path"]
+
+    def pick(self, use_on, off_path=None, on_path=None):
+        v = on_path if use_on else off_path
+        if v is None:
+            raise ValueError(
+                "H3AnySwitch: the selected input (%s) is not connected"
+                % ("on_path" if use_on else "off_path"))
+        return (v,)
+
+
+class H3StudioSwitches:
+    """One labeled panel of feature toggles; each BOOLEAN output drives H3AnySwitch gates."""
+
+    FLAGS = [
+        ("two_pass_upscale", True),
+        ("sol_attn", True),
+        ("chunk_ffn", True),
+        ("spectrum", True),
+        ("block_cache", True),
+        ("dual_clock_sampler", False),
+        ("hybrid_cond", False),
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {n: ("BOOLEAN", {"default": d}) for n, d in cls.FLAGS}}
+
+    RETURN_TYPES = tuple("BOOLEAN" for _ in FLAGS)
+    RETURN_NAMES = tuple(n for n, _ in FLAGS)
+    FUNCTION = "emit"
+    CATEGORY = "H3/episode"
+
+    def emit(self, **kw):
+        vals = dict(kw)
+        # INTERLOCK: the dual-clock euler sampler validates for a FULL sigma
+        # schedule (1.0 -> 0.0) and hard-rejects the split schedules two-pass
+        # produces. When both are on, dual_clock wins and two-pass is
+        # suppressed for this run instead of erroring out mid-queue.
+        if vals.get("dual_clock_sampler") and vals.get("two_pass_upscale"):
+            vals["two_pass_upscale"] = False
+            print("[H3StudioSwitches] dual_clock_sampler is ON -> "
+                  "two_pass_upscale suppressed for this run (the dual-clock "
+                  "sampler requires the full sigma schedule and rejects "
+                  "split schedules). Also use a standard full scheduler "
+                  "(simple/beta) with it - RES4SHO curves may not start at "
+                  "exactly sigma 1.0.", flush=True)
+        return tuple(vals[n] for n, _ in self.FLAGS)
+
+
+NODE_CLASS_MAPPINGS["H3AnySwitch"] = H3AnySwitch
+NODE_CLASS_MAPPINGS["H3StudioSwitches"] = H3StudioSwitches
+NODE_DISPLAY_NAME_MAPPINGS["H3AnySwitch"] = "H3 Any Switch (lazy A/B)"
+NODE_DISPLAY_NAME_MAPPINGS["H3StudioSwitches"] = "H3 Studio Switches (feature toggles)"

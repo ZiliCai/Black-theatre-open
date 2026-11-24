@@ -1,0 +1,316 @@
+{
+  "schemaVersion": 2,
+  "id": "minimax-h3-hybrid",
+  "name": "MiniMax H3 Hybrid · 参考图生视频",
+  "version": "2.0.0",
+  "kind": "video",
+  "family": "h3",
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:bbc02763b8920d5f2f80339b8cbda5bcd425a6599a10bc48818639c6a62ea2db",
+  "defaults": {
+    "referenceCount": 2,
+    "seedMode": "random",
+    "steps": 4,
+    "aspect": "16:9"
+  },
+  "limits": {
+    "durationMin": 0.25,
+    "durationMax": 30,
+    "megapixelsMin": 0.1,
+    "megapixelsMax": 16,
+    "stepsMin": 1,
+    "stepsMax": 200,
+    "promptMaxChars": 200000,
+    "maxReferences": 9,
+    "maxLoras": 6
+  },
+  "outputs": {
+    "contextPrefix": {
+      "node": "338",
+      "input": "filename_prefix"
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node": "138",
+      "input": "value"
+    },
+    "seed": {
+      "node": "129",
+      "input": "noise_seed"
+    },
+    "duration": {
+      "node": "132",
+      "input": "value"
+    },
+    "aspect": {
+      "node": "115",
+      "input": "aspect_ratio"
+    },
+    "megapixels": {
+      "node": "115",
+      "input": "megapixels"
+    },
+    "turboEnabled": {
+      "node": "146",
+      "input": "value"
+    },
+    "turboLora": {
+      "node": "145",
+      "input": "lora_name"
+    },
+    "turboStrength": {
+      "node": "145",
+      "input": "strength_model"
+    },
+    "turboSteps": {
+      "node": "144",
+      "input": "value"
+    },
+    "fullSteps": {
+      "node": "143",
+      "input": "value"
+    },
+    "continuationEnabled": {
+      "node": "336",
+      "input": "value"
+    },
+    "continuationClip": {
+      "node": "337",
+      "input": "clip"
+    }
+  },
+  "turboModels": [
+    {
+      "value": "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "label": "FL2V · 8步 · 768p",
+      "steps": 8,
+      "desc": "首尾帧（FL2V）加速，768p 专用版本。"
+    },
+    {
+      "value": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "label": "FL2V · 4步 · 768p",
+      "steps": 4,
+      "desc": "首尾帧（FL2V）加速，4 步更快，768p 专用版本。"
+    },
+    {
+      "value": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "label": "FL2V · 8步 · 通用",
+      "steps": 8,
+      "desc": "首尾帧（FL2V）加速，不限定 768p 的通用版本。"
+    },
+    {
+      "value": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "label": "Ref2V · 8步 · 768p",
+      "steps": 8,
+      "desc": "参考图（Ref2V）加速，768p 专用版本。"
+    },
+    {
+      "value": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "label": "Ref2V · 4步 · v0.1 早期版",
+      "steps": 4,
+      "desc": "参考图（Ref2V）加速，4 步；v0.1 早期版本，效果可能不稳定。"
+    },
+    {
+      "value": "minimax_h3_turbo_v4_step600_ema.safetensors",
+      "label": "Turbo v4 EMA · 8步",
+      "steps": 8,
+      "desc": "Ref2VA 流程常用的 Turbo v4 加速，8 步，完整 EMA 版本。"
+    },
+    {
+      "value": "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors",
+      "label": "Turbo v4 EMA · 8步 · 精简版",
+      "steps": 8,
+      "desc": "Ref2VA 流程常用的 Turbo v4 加速，8 步，pruned 精简体积版本。"
+    }
+  ],
+  "resources": [
+    "diffusion_models/H3/minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+    "text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+    "vae/H3/minimax_h3_video_vae_fp16.safetensors",
+    "vae/H3/minimax_h3_audio_vae_fp32.safetensors"
+  ],
+  "aspects": [
+    {
+      "id": "16:9",
+      "label": "16:9 横屏",
+      "nodeRatio": "16:9 (Widescreen)",
+      "w": 16,
+      "h": 9
+    },
+    {
+      "id": "9:16",
+      "label": "9:16 竖屏",
+      "nodeRatio": "9:16 (Portrait Widescreen)",
+      "w": 9,
+      "h": 16
+    },
+    {
+      "id": "4:3",
+      "label": "4:3 横屏",
+      "nodeRatio": "4:3 (Standard)",
+      "w": 4,
+      "h": 3
+    },
+    {
+      "id": "3:4",
+      "label": "3:4 竖屏",
+      "nodeRatio": "3:4 (Portrait Standard)",
+      "w": 3,
+      "h": 4
+    },
+    {
+      "id": "1:1",
+      "label": "1:1 方形",
+      "nodeRatio": "1:1 (Square)",
+      "w": 1,
+      "h": 1
+    },
+    {
+      "id": "21:9",
+      "label": "21:9 超宽屏",
+      "nodeRatio": "21:9 (Ultrawide)",
+      "w": 21,
+      "h": 9
+    }
+  ],
+  "referenceSlots": [
+    {
+      "id": "reference1",
+      "label": "参考图 1",
+      "picture": "Picture 1",
+      "binding": {
+        "node": "231",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference2",
+      "label": "参考图 2",
+      "picture": "Picture 2",
+      "binding": {
+        "node": "232",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "242",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference3",
+      "label": "参考图 3",
+      "picture": "Picture 3",
+      "binding": {
+        "node": "233",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "243",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference4",
+      "label": "参考图 4",
+      "picture": "Picture 4",
+      "binding": {
+        "node": "234",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "244",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference5",
+      "label": "参考图 5",
+      "picture": "Picture 5",
+      "binding": {
+        "node": "351",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "352",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference6",
+      "label": "参考图 6",
+      "picture": "Picture 6",
+      "binding": {
+        "node": "353",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "354",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference7",
+      "label": "参考图 7",
+      "picture": "Picture 7",
+      "binding": {
+        "node": "355",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "356",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference8",
+      "label": "参考图 8",
+      "picture": "Picture 8",
+      "binding": {
+        "node": "357",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "358",
+        "input": "switch"
+      }
+    },
+    {
+      "id": "reference9",
+      "label": "参考图 9",
+      "picture": "Picture 9",
+      "binding": {
+        "node": "359",
+        "input": "image"
+      },
+      "switchBinding": {
+        "node": "360",
+        "input": "switch"
+      }
+    }
+  ],
+  "loraChain": {
+    "rootNode": "385",
+    "stockNodes": [
+      "361",
+      "150"
+    ],
+    "turboNode": "145",
+    "nonTurboTarget": {
+      "node": "141",
+      "input": "on_false"
+    },
+    "newNodeStart": 388
+  },
+  "extensions": [
+    {
+      "id": "motionDeghost",
+      "label": "运动去残影",
+      "description": "开启后执行第二遍去残影采样，速度较慢",
+      "binding": {
+        "node": "362",
+        "input": "value"
+      }
+    }
+  ]
+}

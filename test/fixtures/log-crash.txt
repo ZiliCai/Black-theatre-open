@@ -1,0 +1,41 @@
+[INFO] Model MiniMaxH3VideoVAE prepared for dynamic VRAM loading. 4965MB Staged. 0 patches attached. Force pre-loaded 128 weights: 352 KB.
+[INFO] Model MiniMaxH3VideoVAE prepared for dynamic VRAM loading. 4965MB Staged. 0 patches attached. Force pre-loaded 128 weights: 352 KB.
+[INFO] Requested to load MiniMaxH3TEModel_
+Windows fatal exception: access violation
+
+Stack (most recent call first):
+  File "C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\_tensor.py", line 1530 in __torch_function__
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-GGUF\ops.py", line 58 in to
+  File "C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1369 in convert
+  File "C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 964 in _apply
+  File "C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\nn\modules\module.py", line 1383 in to
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-GGUF\nodes.py", line 85 in pin_weight_to_device
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\model_patcher.py", line 1090 in load
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-GGUF\nodes.py", line 97 in load
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\model_patcher.py", line 1278 in partially_load
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\model_management.py", line 848 in model_use_more_vram
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\model_management.py", line 820 in model_load
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\model_management.py", line 1034 in load_models_gpu
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\sd.py", line 469 in load_model
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\sd.py", line 411 in encode_from_tokens
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy\sd.py", line 345 in encode_from_tokens_scheduled
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy_extras\nodes_minimax_h3.py", line 360 in execute
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy_api\latest\_io.py", line 2053 in EXECUTE_NORMALIZED
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\comfy_api\internal\__init__.py", line 149 in wrapped_func
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 314 in process_inputs
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 326 in _async_map_node_over_list
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 352 in get_output_data
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 547 in execute
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 789 in execute_async
+  File "asyncio\events.py", line 89 in _run
+  File "asyncio\base_events.py", line 2060 in _run_once
+  File "asyncio\base_events.py", line 683 in run_forever
+  File "asyncio\base_events.py", line 712 in run_until_complete
+  File "asyncio\runners.py", line 119 in run
+  File "asyncio\runners.py", line 196 in run
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\execution.py", line 728 in execute
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\main.py", line 362 in prompt_worker
+  File "threading.py", line 995 in run
+  File "threading.py", line 1044 in _bootstrap_inner
+  File "threading.py", line 1015 in _bootstrap
+[INFO] setup plugin alembic.autogenerate.schemas

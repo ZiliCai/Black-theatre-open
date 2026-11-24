@@ -1,0 +1,52 @@
+.scene-page { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr) 360px; }
+.scene-side { border-right: 1px solid var(--line); background: var(--panel); min-height: 0; display: flex; flex-direction: column; }
+.scene-list { flex: 1; overflow: auto; padding: 6px 0; }
+.scene-main { position: relative; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.scene-tools { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: 8px var(--s3); border-bottom: 1px solid var(--line); background: var(--panel); }
+.scene-tools .seg-floors { display: inline-flex; gap: 2px; }
+.scene-tools .c-select { max-width: 220px; }
+.chk { display: inline-flex; align-items: center; gap: 4px; color: var(--sub); font-size: var(--fs-sm); cursor: pointer; }
+.scene-banner { padding: 6px var(--s3); background: #2a2216; border-bottom: 1px solid #4a3a1e; font-size: var(--fs-sm); }
+.scene-stage { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* z-index 0: its names (three.js gives each a z-index of its own) stay inside it, under the plan */
+.scene-view { position: relative; z-index: 0; flex: 1; min-height: 0; overflow: hidden; }
+/* the plan: a drawing on paper over the 3D view */
+.scene-plan { position: absolute; inset: 0; overflow: hidden; background: #f4f2ed; cursor: grab; touch-action: none; user-select: none; z-index: 1; }
+.scene-plan:active { cursor: grabbing; }
+.scene-plan svg { display: block; }
+.scene-plan text { font-family: var(--font, system-ui), sans-serif; text-anchor: middle; dominant-baseline: middle; paint-order: stroke; stroke: #f4f2edd9; stroke-width: 3px; stroke-linejoin: round; }
+.scene-plan .plan-room { font-size: 13px; font-weight: 600; fill: #2c2c2c; }
+.scene-plan .plan-thing { font-size: 10px; fill: #6a665f; }
+.scene-plan .plan-person { font-size: 11px; font-weight: 600; fill: #a8402c; }
+.scene-plan .plan-scale text, .scene-plan .plan-north text { font-size: 11px; fill: #2c2c2c; stroke: none; }
+.scene-plan .plan-north text { font-weight: 600; }
+.scene-tip { position: absolute; pointer-events: none; padding: 3px 8px; background: rgba(0, 0, 0, .8); color: #fff; border-radius: 4px; display: none; z-index: 2; white-space: nowrap; font-size: var(--fs-sm); }
+.scene-hint { z-index: 2; position: absolute; left: var(--s3); bottom: var(--s2); color: #fff; background: rgba(20, 22, 26, .6); border-radius: 4px; padding: 2px 8px; font-size: var(--fs-xs); pointer-events: none; }
+.scene-lbl { color: #fff; padding: 1px 6px; border-radius: 4px; font-size: 12px; white-space: nowrap; pointer-events: none; }
+.scene-lbl.out { background: rgba(120, 80, 20, .75); }
+.scene-lbl.room { background: rgba(30, 60, 90, .75); }
+
+.scene-panel { border-left: 1px solid var(--line); background: var(--panel); min-height: 0; display: flex; flex-direction: column; }
+.scene-tabs { padding: 8px var(--s3); border-bottom: 1px solid var(--line); }
+.scene-ai, .scene-problems, .scene-data { flex: 1; min-height: 0; overflow: auto; padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+.scene-ai .c-btn { align-self: flex-end; }
+.scene-ai .picked { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); font-size: var(--fs-sm); padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r2); }
+.scene-ai .picked .c-btn { align-self: auto; }
+.proposal { border: 1px solid var(--acc); border-radius: var(--r2); padding: var(--s2) var(--s3); display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-sm); }
+.proposal .op { display: flex; gap: 6px; align-items: flex-start; }
+.proposal .op.ok { color: var(--sub); }
+.proposal .op.bad { color: var(--bad); }
+.proposal .added { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.proposal .row, .scene-data .row { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: 6px; }
+.prob { font-size: var(--fs-sm); line-height: 1.6; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.prob .lv { display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 4px; margin-right: 6px; font-size: 11px; }
+.prob.error { color: var(--text); } .prob.error .lv { background: var(--bad); color: #fff; }
+.prob.warn { color: var(--sub); } .prob.warn .lv { background: var(--panel-2); color: var(--sub); border: 1px solid var(--line); }
+.scene-data .json { flex: 1; min-height: 300px; font-family: Consolas, monospace; font-size: var(--fs-xs); line-height: 1.5; resize: none; }
+.scene-data .err { color: var(--bad); font-size: var(--fs-sm); }
+.scene-foot { padding: 6px var(--s3); border-top: 1px solid var(--line); font-size: var(--fs-xs); color: var(--sub); }
+.scene-foot .bad { color: var(--bad); } .scene-foot .good { color: var(--good); }
+.scene-docs { max-height: 30vh; overflow: auto; display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--line); border-radius: var(--r2); padding: 6px 8px; margin: var(--s2) 0; }
+.scene-blocking .facts { display: flex; flex-direction: column; gap: var(--s2); }
+.scene-blocking .fact { border: 1px solid var(--line); border-radius: var(--r2); padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; }
+.scene-blocking .fact pre { margin: 0; white-space: pre-wrap; font-family: inherit; font-size: var(--fs-sm); line-height: 1.55; }

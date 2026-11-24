@@ -1,0 +1,82 @@
+/* ---------- Button ---------- */
+.c-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s2);
+  height: var(--h-md); padding: 0 var(--s4); border-radius: var(--r2);
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  font-size: var(--fs-sm); font-weight: 500;
+}
+.c-btn:hover:not(:disabled) { border-color: var(--dim); }
+.c-btn:disabled { opacity: .45; }
+.c-btn.sm { height: var(--h-sm); padding: 0 var(--s3); font-size: var(--fs-xs); }
+.c-btn.lg { height: var(--h-lg); padding: 0 var(--s5); font-size: var(--fs-md); }
+.c-btn.primary { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
+.c-btn.primary:hover:not(:disabled) { filter: brightness(1.08); border-color: var(--acc); }
+.c-btn.danger:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+.c-btn.ghost { background: transparent; border-color: transparent; color: var(--sub); }
+.c-btn.ghost:hover:not(:disabled) { background: var(--panel-2); color: var(--text); border-color: transparent; }
+.c-btn.on-good { color: var(--good); border-color: var(--good); }
+.c-btn.on-acc { color: var(--acc); border-color: var(--acc); }
+.c-btn svg { width: 16px; height: 16px; }
+
+/* ---------- Segmented ---------- */
+.c-seg { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--r3); background: var(--bg); border: 1px solid var(--line); }
+.c-seg button { height: calc(var(--h-sm) - 4px); padding: 0 var(--s3); border-radius: var(--r1); color: var(--dim); font-size: var(--fs-xs); }
+.c-seg button:hover { color: var(--sub); }
+.c-seg button.on { background: var(--panel-2); color: var(--text); }
+.c-seg.wide { display: flex; }
+.c-seg.wide button { flex: 1; height: 34px; font-size: var(--fs-md); }
+
+/* ---------- Field / inputs ---------- */
+.c-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.c-field > .c-label { font-size: var(--fs-sm); color: var(--dim); display: flex; justify-content: space-between; gap: var(--s2); }
+.c-field > .c-label .hint { color: var(--dim); }
+.c-input, .c-select, .c-textarea {
+  width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: var(--r3);
+  color: var(--text); font-size: var(--fs-md); outline: none;
+}
+.c-input, .c-select { height: var(--h-lg); padding: 0 var(--s3); }
+.c-select { appearance: none; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--sub) 50%), linear-gradient(135deg, var(--sub) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+.c-select option { background: var(--panel); }
+.c-textarea { padding: var(--s3); resize: none; line-height: 1.65; }
+.c-input:focus, .c-select:focus, .c-textarea:focus { border-color: var(--dim); }
+.c-input:disabled, .c-select:disabled, .c-textarea:disabled { opacity: .5; }
+.c-input.sm, .c-select.sm { height: var(--h-md); font-size: var(--fs-sm); border-radius: var(--r2); }
+
+/* ---------- Pill ---------- */
+.c-pill { display: inline-flex; align-items: center; gap: 6px; height: var(--h-sm); padding: 0 var(--s3); border-radius: var(--r2);
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--sub); font-size: var(--fs-sm); }
+.c-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+.c-pill.ok .dot { background: var(--good); }
+.c-pill.warn .dot { background: var(--acc); }
+.c-pill.bad .dot { background: var(--bad); }
+
+/* ---------- Modal ---------- */
+.c-modal-back { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: grid; place-items: center; z-index: 50; }
+.c-modal { width: min(520px, calc(100vw - 48px)); max-height: calc(100vh - 96px); display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 24px 60px rgba(0, 0, 0, .5); }
+.c-modal.wide { width: min(760px, calc(100vw - 48px)); }
+.c-modal header { padding: var(--s4) var(--s5); font-size: var(--fs-lg); font-weight: 600; border-bottom: 1px solid var(--line); }
+.c-modal .body { padding: var(--s5); overflow: auto; display: flex; flex-direction: column; gap: var(--s4); font-size: var(--fs-md); }
+.c-modal footer { padding: var(--s3) var(--s5); border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: var(--s2); }
+
+/* ---------- Toast ---------- */
+/* top right, just under the top bar: the bottom of most pages holds controls (timeline, chat box, send) */
+.c-toasts { position: fixed; top: calc(var(--top-h) + 12px); right: 16px; display: flex; flex-direction: column; gap: var(--s2); align-items: flex-end; z-index: 60; pointer-events: none; }
+/* a banner under the top bar (restart ComfyUI, error report) keeps its buttons clear of the toasts */
+body:has(.banner-wrap .banner) .c-toasts { top: calc(var(--top-h) + 60px); }
+body:has(.banner-wrap .banner + .banner) .c-toasts { top: calc(var(--top-h) + 104px); }
+.c-toast { pointer-events: auto; max-width: 640px; display: flex; align-items: center; gap: var(--s3); padding: 10px var(--s4);
+  border-radius: var(--r3); background: var(--panel-2); border: 1px solid var(--line); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); font-size: var(--fs-md); }
+.c-toast.bad { border-color: var(--bad); }
+.c-toast.ok { border-color: var(--good); }
+
+/* ---------- EmptyState ---------- */
+.c-empty { margin: auto; max-width: 420px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: var(--s3); padding: var(--s6); }
+.c-empty h3 { font-size: var(--fs-xl); font-weight: 600; }
+.c-empty p { color: var(--sub); font-size: var(--fs-md); line-height: 1.7; }
+
+/* ---------- section heading inside panels ---------- */
+.c-section-title { font-size: var(--fs-sm); color: var(--sub); font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: var(--s2); }
+.c-section-title .hint { font-weight: 400; color: var(--dim); }

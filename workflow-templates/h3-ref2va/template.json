@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "id": "h3-ref2va",
+  "name": "H3 Ref2VA · 参考图生视频",
+  "version": "1.0.0",
+  "kind": "video",
+  "family": "h3",
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:aca2075890716256aa970ae591f6c43ac2776d2c960cc7df2c5362bbd5bc4a6f",
+  "defaults": {
+    "quality": "turbo10",
+    "aspect": "16:9"
+  },
+  "limits": {
+    "durationMin": 0.25,
+    "durationMax": 30,
+    "shortEdgeMin": 256,
+    "shortEdgeMax": 1536,
+    "promptMaxChars": 200000,
+    "filenameMaxChars": 80
+  },
+  "outputs": {
+    "contextPrefix": {
+      "node": "1196",
+      "input": "filename_prefix"
+    },
+    "videoPrefix": {
+      "node": "1181",
+      "input": "filename_prefix"
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node": "1241",
+      "input": "value"
+    },
+    "loraName": {
+      "node": "1155",
+      "input": "lora_name"
+    },
+    "loraStrength": {
+      "node": "1155",
+      "input": "strength_model"
+    },
+    "steps": {
+      "node": "1165",
+      "input": "steps"
+    },
+    "duration": {
+      "node": "1160",
+      "input": "value"
+    },
+    "resolution": {
+      "node": "1161",
+      "input": "ResolutionState"
+    },
+    "filenamePrefix": {
+      "node": "1181",
+      "input": "filename_prefix"
+    },
+    "seed": {
+      "node": "1154",
+      "input": "value"
+    }
+  },
+  "qualityPresets": [
+    {
+      "id": "turbo10",
+      "label": "Turbo v4 · 10步（模板默认）",
+      "loraName": "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors",
+      "loraStrength": 1,
+      "steps": 10
+    },
+    {
+      "id": "turbo8",
+      "label": "Turbo v4 · 8步",
+      "loraName": "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors",
+      "loraStrength": 1,
+      "steps": 8
+    },
+    {
+      "id": "ref2v4",
+      "label": "Ref2V Turbo · 4步",
+      "loraName": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "loraStrength": 1,
+      "steps": 4
+    }
+  ],
+  "aspects": [
+    {
+      "id": "16:9",
+      "label": "16:9 横屏",
+      "nodeRatio": "16:9 widescreen",
+      "w": 16,
+      "h": 9
+    },
+    {
+      "id": "9:16",
+      "label": "9:16 竖屏",
+      "nodeRatio": "9:16 portrait",
+      "w": 9,
+      "h": 16
+    },
+    {
+      "id": "4:3",
+      "label": "4:3 横屏",
+      "nodeRatio": "4:3 standard",
+      "w": 4,
+      "h": 3
+    },
+    {
+      "id": "3:4",
+      "label": "3:4 竖屏",
+      "nodeRatio": "3:4 portrait",
+      "w": 3,
+      "h": 4
+    },
+    {
+      "id": "1:1",
+      "label": "1:1 方形",
+      "nodeRatio": "1:1 square",
+      "w": 1,
+      "h": 1
+    }
+  ],
+  "referenceSlots": [
+    {
+      "id": "reference1",
+      "label": "参考图 1",
+      "picture": "Picture 1",
+      "binding": {
+        "node": "1265",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference2",
+      "label": "参考图 2",
+      "picture": "Picture 2",
+      "binding": {
+        "node": "1266",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference3",
+      "label": "参考图 3",
+      "picture": "Picture 3",
+      "binding": {
+        "node": "1267",
+        "input": "image"
+      }
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+  File "threading.py", line 1044 in _bootstrap_inner
+  File "threading.py", line 1015 in _bootstrap
+Fatal Python error: preconfig_init_utf8_mode: invalid PYTHONUTF8 environment variable value
+Python runtime state: preinitializing
+
+[INFO] setup plugin alembic.autogenerate.schemas

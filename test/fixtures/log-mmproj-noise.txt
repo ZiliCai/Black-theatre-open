@@ -1,0 +1,3 @@
+[INFO] Attenpting to find mmproj file for text encoder...
+[ERROR] Error: Can't find mmproj file for 'qwen3vl_32b_minimax_h3-Q4_K_M.gguf' (matching:'qwen3vl_32b_minimax_h3')! Qwen-Image-Edit will be broken!
+[INFO] Model storage policy: fast_disk=False paths=[]

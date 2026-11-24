@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 2,
+  "id": "qwen-image-t2i",
+  "name": "Qwen-Image 2.1 · 文生图",
+  "version": "1.0.0",
+  "kind": "image",
+  "family": "qwen-image",
+  "defaults": {
+    "aspect": "3:4",
+    "seedMode": "random"
+  },
+  "limits": {
+    "promptMaxChars": 20000
+  },
+  "outputs": {
+    "imagePrefix": {
+      "node": "8",
+      "input": "filename_prefix"
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node": "4",
+      "input": "prompt"
+    },
+    "seed": {
+      "node": "6",
+      "input": "seed"
+    },
+    "width": {
+      "node": "5",
+      "input": "width"
+    },
+    "height": {
+      "node": "5",
+      "input": "height"
+    }
+  },
+  "resources": [
+    "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+    "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+    "vae/qwen_image_2.1_vae_bf16.safetensors"
+  ],
+  "aspects": [
+    {
+      "id": "3:4",
+      "label": "3:4 竖图",
+      "w": 1140,
+      "h": 1472
+    },
+    {
+      "id": "2:3",
+      "label": "2:3 竖图",
+      "w": 1056,
+      "h": 1584
+    },
+    {
+      "id": "1:1",
+      "label": "1:1 方图",
+      "w": 1328,
+      "h": 1328
+    },
+    {
+      "id": "16:9",
+      "label": "16:9 横图",
+      "w": 1664,
+      "h": 928
+    },
+    {
+      "id": "9:16",
+      "label": "9:16 竖屏",
+      "w": 928,
+      "h": 1664
+    },
+    {
+      "id": "4:3",
+      "label": "4:3 横图",
+      "w": 1472,
+      "h": 1140
+    },
+    {
+      "id": "3:2",
+      "label": "3:2 横图",
+      "w": 1584,
+      "h": 1056
+    }
+  ],
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:135852a7e6b1c0ba6526b1a46d81970f5d00815c982de2d878d275c434b08769"
+}

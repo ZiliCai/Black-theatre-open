@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 2,
+  "id": "minimax-h3-wenwu-cont",
+  "name": "MiniMax H3 文武双全 · 参考图生视频 · 接续版",
+  "version": "1.1.0",
+  "kind": "video",
+  "family": "h3",
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:1d803d3435002e05e504b32a6a121c856d2a2450afb6cf96e4f23375faa8a793",
+  "defaults": {
+    "referenceCount": 2,
+    "seedMode": "random",
+    "steps": 12,
+    "aspect": "16:9"
+  },
+  "limits": {
+    "durationMin": 0.25,
+    "durationMax": 30,
+    "megapixelsMin": 0.1,
+    "megapixelsMax": 16,
+    "stepsMin": 1,
+    "stepsMax": 200,
+    "promptMaxChars": 200000,
+    "maxReferences": 6,
+    "maxLoras": 4
+  },
+  "outputs": {
+    "contextPrefix": {
+      "node": "507",
+      "input": "filename_prefix"
+    },
+    "videoPrefix": {
+      "node": "364",
+      "input": "filename_prefix"
+    }
+  },
+  "bindings": {
+    "prompt": {
+      "node": "263",
+      "input": "value"
+    },
+    "seed": {
+      "node": "397",
+      "input": "seed"
+    },
+    "duration": {
+      "node": "259",
+      "input": "value"
+    },
+    "aspect": {
+      "node": "252",
+      "input": "aspect_ratio"
+    },
+    "megapixels": {
+      "node": "252",
+      "input": "megapixels"
+    },
+    "steps": {
+      "node": "261",
+      "input": "steps"
+    },
+    "continuationEnabled": {
+      "node": "500",
+      "input": "value"
+    },
+    "continuationClip": {
+      "node": "501",
+      "input": "clip"
+    }
+  },
+  "resources": [
+    "diffusion_models/H3/minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+    "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+    "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+    "vae/H3/minimax_h3_audio_vae_fp32.safetensors",
+    "latent_upscale_models/minimax_h3_latent_upscaler_3d_fp16.safetensors"
+  ],
+  "aspects": [
+    {
+      "id": "16:9",
+      "label": "16:9 横屏",
+      "nodeRatio": "16:9 (Widescreen)",
+      "w": 16,
+      "h": 9
+    },
+    {
+      "id": "9:16",
+      "label": "9:16 竖屏",
+      "nodeRatio": "9:16 (Portrait Widescreen)",
+      "w": 9,
+      "h": 16
+    },
+    {
+      "id": "4:3",
+      "label": "4:3 横屏",
+      "nodeRatio": "4:3 (Standard)",
+      "w": 4,
+      "h": 3
+    },
+    {
+      "id": "3:4",
+      "label": "3:4 竖屏",
+      "nodeRatio": "3:4 (Portrait Standard)",
+      "w": 3,
+      "h": 4
+    },
+    {
+      "id": "1:1",
+      "label": "1:1 方形",
+      "nodeRatio": "1:1 (Square)",
+      "w": 1,
+      "h": 1
+    },
+    {
+      "id": "21:9",
+      "label": "21:9 超宽屏",
+      "nodeRatio": "21:9 (Ultrawide)",
+      "w": 21,
+      "h": 9
+    }
+  ],
+  "referenceSlots": [
+    {
+      "id": "reference1",
+      "label": "参考图 1",
+      "picture": "Picture 1",
+      "binding": {
+        "node": "51",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference2",
+      "label": "参考图 2",
+      "picture": "Picture 2",
+      "binding": {
+        "node": "49",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference3",
+      "label": "参考图 3",
+      "picture": "Picture 3",
+      "binding": {
+        "node": "50",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference4",
+      "label": "参考图 4",
+      "picture": "Picture 4",
+      "binding": {
+        "node": "43",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference5",
+      "label": "参考图 5",
+      "picture": "Picture 5",
+      "binding": {
+        "node": "19",
+        "input": "image"
+      }
+    },
+    {
+      "id": "reference6",
+      "label": "参考图 6",
+      "picture": "Picture 6",
+      "binding": {
+        "node": "23",
+        "input": "image"
+      }
+    }
+  ],
+  "loraChain": {
+    "rootNode": "192",
+    "stockNodes": [
+      "53"
+    ],
+    "tailBinding": {
+      "node": "331",
+      "input": "model"
+    },
+    "newNodeStart": 405
+  },
+  "extensions": []
+}

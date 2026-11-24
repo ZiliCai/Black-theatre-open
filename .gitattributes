@@ -1,0 +1,2 @@
+# Templates check a sha256 of their workflow file, so its bytes must never be converted (line endings included).
+workflow-templates/**/workflow.api.json -text

@@ -1,0 +1,91 @@
+.script { flex: 1; min-height: 0; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+.doc-side { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+.doc-side .head { padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); border-bottom: 1px solid var(--line); }
+.doc-side .folder { font-size: var(--fs-xs); color: var(--dim); }
+.doc-list { flex: 1; overflow: auto; padding: 6px 0 var(--s3); }
+.doc-cat { display: flex; justify-content: space-between; padding: 10px var(--s3) 4px; font-size: var(--fs-xs); color: var(--dim); font-weight: 600; }
+.doc-item { width: 100%; text-align: left; padding: 7px var(--s3); border-left: 2px solid transparent; display: flex; flex-direction: column; gap: 2px; }
+.doc-item:hover { background: var(--panel-2); }
+.doc-item.on { background: var(--panel-2); border-left-color: var(--acc); }
+.doc-item .t { font-size: var(--fs-sm); display: flex; gap: 6px; align-items: center; }
+.doc-item .t i { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; }
+.doc-item .s { font-size: var(--fs-xs); color: var(--dim); }
+.doc-item .snip { font-size: var(--fs-xs); color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-none { padding: var(--s4) var(--s3); color: var(--dim); font-size: var(--fs-sm); }
+.doc-side .foot { padding: var(--s3); border-top: 1px solid var(--line); display: flex; gap: var(--s2); }
+.doc-side .foot .c-btn { flex: 1; }
+
+.doc-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.doc-tools { display: flex; align-items: center; gap: var(--s2); padding: 10px var(--s5); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.doc-tools h2 { font-size: var(--fs-lg); font-weight: 600; margin-right: var(--s2); }
+.doc-tools .dirty { color: var(--acc); font-size: var(--fs-xs); }
+.doc-notice { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: 10px var(--s5); background: #2a2216; border-bottom: 1px solid #4a3a1e; font-size: var(--fs-md); }
+.doc-body { flex: 1; min-height: 0; overflow: auto; }
+.doc-body .inner { max-width: 860px; margin: 0 auto; padding: var(--s6) var(--s6) 80px; }
+.doc-editor { width: 100%; height: 100%; min-height: 100%; border: 0; border-radius: 0; background: var(--bg); padding: var(--s6) max(var(--s6), calc((100% - 860px) / 2));
+  font-family: Consolas, 'Noto Sans SC', monospace; font-size: var(--fs-md); line-height: 1.8; resize: none; }
+
+.md { font-size: 15px; line-height: 1.8; color: var(--text); user-select: text; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { line-height: 1.4; margin: 1.4em 0 .6em; font-weight: 700; }
+.md h2 { font-size: 24px; } .md h3 { font-size: 19px; } .md h4 { font-size: 16px; } .md h5, .md h6 { font-size: 15px; }
+.md > :first-child { margin-top: 0; }
+.md p { margin: .6em 0; }
+.md ul, .md ol { padding-left: 1.5em; margin: .5em 0; }
+.md code { font-family: Consolas, monospace; font-size: 13px; background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+.md pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s3); overflow: auto; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { border-left: 3px solid var(--line); padding-left: var(--s3); color: var(--sub); margin: .6em 0; }
+.md hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
+.md .md-link { color: var(--acc); text-decoration: underline dotted; }
+.md-table-wrap { overflow: auto; margin: .8em 0; }
+.md table { border-collapse: collapse; font-size: var(--fs-md); }
+.md th, .md td { border: 1px solid var(--line); padding: 6px 10px; vertical-align: top; }
+.md th { background: var(--panel-2); }
+.md .al-center { text-align: center; } .md .al-right { text-align: right; }
+
+.hist { display: grid; grid-template-columns: 200px 1fr; gap: var(--s3); height: 56vh; }
+.hist-list { overflow: auto; border: 1px solid var(--line); border-radius: var(--r2); }
+.hist-view { overflow: auto; margin: 0; white-space: pre-wrap; font-family: Consolas, 'Noto Sans SC', monospace; font-size: var(--fs-xs); line-height: 1.7;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s3); color: var(--sub); user-select: text; }
+
+.script.with-chat { grid-template-columns: 260px minmax(0, 1fr) 420px; }
+.chat-side { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.chat-head { display: flex; align-items: center; gap: var(--s2); padding: 10px var(--s3); border-bottom: 1px solid var(--line); }
+.chat-docs { display: flex; align-items: center; justify-content: space-between; padding: 8px var(--s3); font-size: var(--fs-xs); color: var(--sub); border-bottom: 1px solid var(--line); text-align: left; }
+.chat-docs:hover { background: var(--panel-2); }
+.chat-docs.over { color: var(--bad); }
+.chat-pick { max-height: 34vh; overflow: auto; padding: 6px var(--s3); border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-xs); }
+.chat-pick label { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--s2); align-items: center; cursor: pointer; color: var(--sub); }
+.chat-pick .warn { color: var(--bad); margin: 4px 0; }
+.chat-list { flex: 1; min-height: 0; overflow: auto; padding: var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
+.chat-empty { color: var(--dim); font-size: var(--fs-sm); line-height: 1.7; }
+.chat-msg { font-size: var(--fs-md); line-height: 1.7; user-select: text; }
+.chat-msg.user { align-self: flex-end; max-width: 88%; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r2); padding: 8px 12px; white-space: pre-wrap; }
+.chat-msg.ai { display: flex; flex-direction: column; gap: var(--s2); }
+.chat-msg.ai .md { font-size: var(--fs-md); }
+.chat-msg.ai .md h2 { font-size: 17px; } .chat-msg.ai .md h3 { font-size: 15px; }
+.chat-msg.pending { color: var(--dim); font-size: var(--fs-sm); }
+.chat-edit, .chat-shots { border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s2) var(--s3); background: var(--bg); display: flex; flex-direction: column; gap: 6px; }
+.chat-edit.applied { border-color: var(--good); }
+.chat-edit .eh, .chat-shots .eh { display: flex; align-items: center; gap: var(--s2); font-size: var(--fs-sm); }
+.chat-edit .eh .num { color: var(--dim); }
+.chat-edit .doc { color: var(--acc); text-decoration: underline dotted; max-width: 220px; }
+.chat-edit .done { color: var(--good); display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-xs); }
+.chat-edit .why { color: var(--sub); font-size: var(--fs-sm); }
+.chat-edit pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: Consolas, 'Noto Sans SC', monospace; font-size: var(--fs-xs); line-height: 1.6;
+  padding: 6px 8px; border-radius: var(--r1); max-height: 220px; overflow: auto; }
+.chat-edit pre.old { background: rgba(220, 80, 80, .1); color: var(--sub); text-decoration: line-through; text-decoration-color: rgba(220, 80, 80, .5); }
+.chat-edit pre.new { background: rgba(80, 200, 120, .1); }
+.chat-edit.applied pre.old { display: none; }
+.chat-edit .err { color: var(--bad); font-size: var(--fs-sm); }
+.chat-shots .row { font-size: var(--fs-sm); display: flex; gap: var(--s2); line-height: 1.6; }
+.chat-shots .row .num { color: var(--dim); flex: none; }
+.chat-shots.done { opacity: .75; }
+.chat-input { border-top: 1px solid var(--line); padding: var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+.chat-input textarea { resize: vertical; min-height: 64px; }
+.chat-input .c-btn { align-self: flex-end; }
+
+/* the "how to write a shot document" hint under the empty state: quiet until opened */
+.doc-howto { max-width: 420px; color: var(--sub); font-size: var(--fs-sm); line-height: 1.7; text-align: left; }
+.doc-howto summary { cursor: pointer; text-align: center; color: var(--dim); }
+.doc-howto p { margin-top: var(--s2); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r2); }

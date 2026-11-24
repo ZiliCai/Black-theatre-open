@@ -1,0 +1,90 @@
+.assets {
+  flex: 1; min-height: 0; display: grid;
+  grid-template-columns: var(--list-w) minmax(0, 1fr) var(--inspector-w);
+  grid-template-rows: minmax(0, 1fr) var(--kept-h);
+}
+
+/* ---------- card list ---------- */
+.card-list { border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.card-list .head { padding: var(--s3); border-bottom: 1px solid var(--line); }
+.card-list .rows { flex: 1; overflow: auto; padding: 6px 0; }
+.card-list .none { padding: var(--s4) var(--s3); color: var(--dim); font-size: var(--fs-sm); }
+.card-row { width: 100%; display: grid; grid-template-columns: 40px minmax(0, 1fr); gap: 10px; align-items: center;
+  padding: 8px var(--s3); border-left: 2px solid transparent; text-align: left; }
+.card-row:hover { background: var(--panel); }
+.card-row.on { background: var(--panel-2); border-left-color: var(--acc); }
+.card-row .thumb { width: 40px; height: 52px; border-radius: var(--r1); object-fit: cover; display: block; }
+.card-row.scene .thumb { height: 26px; }
+.card-row .thumb.empty { border: 1px dashed var(--line); }
+.card-row .txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.card-row b { font-weight: 500; font-size: var(--fs-sm); }
+.card-row small { font-size: var(--fs-xs); color: var(--dim); }
+.card-row small.ready { color: var(--good); }
+.card-row small.busy { color: var(--acc); }
+.card-row.orphan b { color: var(--dim); }
+.card-list .foot { padding: var(--s3); border-top: 1px solid var(--line); }
+.card-list .foot .c-btn { width: 100%; }
+
+/* ---------- centre: picture viewer + batches ---------- */
+.assets .shot-centre { padding-bottom: var(--s2); }
+.assets .viewer .bar .kept-label { color: var(--good); font-weight: 500; }
+.pic-batches { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px 16px; max-height: 320px; overflow-y: auto; }
+.pic-batch { display: flex; flex-direction: column; min-width: 0; max-width: 100%; }
+/* the header never makes its batch wider than the pictures under it */
+.pic-batch .strip-head { width: 0; min-width: 100%; white-space: nowrap; }
+.pic-batch .strip-head b { flex: none; }
+.pic-batch .strip-head .ellipsis { min-width: 0; }
+.pic-strip { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 2px; }
+.pic-strip > .take.pic { width: 78px; flex: none; }
+.take.pic .thumb { aspect-ratio: 3 / 4; }
+.take.pic .thumb img { object-fit: cover; }
+
+/* ---------- inspector ---------- */
+.asset-inspector .ask { height: 110px; font-size: var(--fs-md); }
+.asset-inspector .fixed-val { height: var(--h-md); display: flex; align-items: center; color: var(--sub); font-size: var(--fs-sm); }
+.asset-inspector .desc { font-size: var(--fs-sm); color: var(--sub); line-height: 1.7; white-space: pre-wrap; }
+.asset-inspector .dim { color: var(--dim); }
+.asset-inspector .link { color: var(--acc); font-size: var(--fs-xs); font-weight: 400; }
+.asset-inspector .link:hover { text-decoration: underline; }
+.asset-inspector .final summary { cursor: pointer; color: var(--sub); font-size: var(--fs-sm); }
+.asset-inspector .final pre { margin-top: var(--s2); padding: 10px 12px; border-radius: var(--r3); background: var(--bg); border: 1px solid var(--line);
+  font: inherit; font-size: var(--fs-sm); color: var(--sub); white-space: pre-wrap; line-height: 1.65; max-height: 220px; overflow: auto; }
+.asset-inspector .chips { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.asset-inspector .chip { height: 28px; padding: 0 10px; border-radius: var(--r2); background: var(--bg); border: 1px solid var(--line); color: var(--sub); font-size: var(--fs-sm); }
+.asset-inspector .chip:hover { color: var(--text); border-color: var(--dim); }
+.base-pick { display: flex; gap: var(--s3); align-items: center; padding: 8px; border-radius: var(--r3); background: var(--bg); border: 1px solid var(--line); text-align: left; }
+.base-pick:hover { border-color: var(--dim); }
+.base-pick img, .base-pick .thumb { width: 54px; height: 72px; border-radius: var(--r1); object-fit: cover; flex: none; }
+.base-pick .thumb.empty { border: 1px dashed var(--line); }
+.base-pick small { display: block; color: var(--dim); font-size: var(--fs-xs); margin-top: 2px; }
+
+/* ---------- bottom: kept pictures ---------- */
+.kept { grid-column: 1 / -1; border-top: 1px solid var(--line); background: var(--panel); padding: 10px var(--s4) 12px; display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+.kept-head { display: flex; align-items: baseline; gap: 10px; font-size: var(--fs-sm); }
+.kept-head b { font-weight: 600; }
+.kept-head span { color: var(--dim); font-size: var(--fs-xs); }
+.kept-track { flex: 1; min-height: 0; display: flex; gap: 8px; overflow-x: auto; }
+.kept-pic { position: relative; height: 100%; aspect-ratio: 3 / 4; flex: none; border-radius: var(--r2); overflow: hidden; border: 1px solid var(--line); cursor: pointer; background: #0a0a0b; }
+.kept-track.scene .kept-pic { aspect-ratio: 16 / 9; }
+.kept-pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.kept-pic.main { border-color: var(--good); }
+.kept-pic.on { outline: 2px solid var(--text); outline-offset: -2px; }
+.kept-pic .badge { position: absolute; top: 5px; left: 5px; height: 20px; padding: 0 6px; border-radius: 4px; background: var(--good); color: var(--good-ink); font-size: var(--fs-xs); font-weight: 600; line-height: 20px; }
+.kept-pic .cap { position: absolute; inset: auto 0 0 0; padding: 4px 6px; font-size: var(--fs-xs); background: linear-gradient(transparent, rgba(0, 0, 0, .85)); }
+.kept-pic .tools { position: absolute; top: 4px; right: 4px; display: none; gap: 4px; }
+.kept-pic:hover .tools { display: flex; }
+.kept-pic .tools button { width: 22px; height: 22px; border-radius: 50%; background: rgba(0, 0, 0, .7); display: grid; place-items: center; color: var(--text); }
+.kept-pic .tools button:hover { color: var(--acc); }
+.kept-add { flex: none; width: 92px; border-radius: var(--r2); border: 1px dashed var(--line); color: var(--sub); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: var(--fs-xs); }
+.kept-add:hover:not(:disabled) { color: var(--text); border-color: var(--dim); }
+.kept-add:disabled { opacity: .45; }
+.pick-grid .no-preview { aspect-ratio: 1; display: grid; place-items: center; text-align: center; color: var(--dim); font-size: var(--fs-xs); line-height: 1.6; padding: 6px; }
+.asset-inspector .revise { display: flex; gap: var(--s2); margin-top: var(--s2); }
+.asset-inspector .revise .c-input { flex: 1; min-width: 0; }
+
+.picture-settings { display:grid; gap:8px; }
+.picture-settings .c-field { display:grid; grid-template-columns: 7em 1fr; align-items:center; }
+.picture-settings > button { justify-self:end; }
+
+/* delete stands apart from the other picture buttons so it is not hit by accident */
+#btn-pic-trash { margin-left: 16px; }

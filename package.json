@@ -1,0 +1,28 @@
+{
+  "name": "blackbox-theater",
+  "version": "2.1.0",
+  "description": "黑箱剧场 BlackBox Theater:ComfyUI 固定工作流控制台(MiniMax H3 短剧生成)",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "build": "vite build --config ui/vite.config.mts",
+    "dev:ui": "vite --config ui/vite.config.mts",
+    "start": "npm run build && electron .",
+    "smoke": "npm run build && electron . --smoke",
+    "typecheck": "tsc -p ui/tsconfig.json --noEmit",
+    "test": "node --test \"test/**/*.test.js\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/*.itest.js\""
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@types/three": "0.160.0",
+    "@vitejs/plugin-react": "4.3.3",
+    "electron": "43.7.7",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "three": "0.160.0",
+    "typescript": "5.6.3",
+    "vite": "5.4.10"
+  }
+}

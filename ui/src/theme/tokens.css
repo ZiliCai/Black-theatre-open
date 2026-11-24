@@ -1,0 +1,30 @@
+/* Every colour, size and space in the app comes from here. Components never hard-code these values. */
+:root {
+  --bg: #141517;
+  --panel: #1b1c1f;
+  --panel-2: #222327;
+  --line: #2c2d32;
+  --text: #e8e8ea;
+  --sub: #9a9ba3;
+  --dim: #6b6c74;
+  --acc: #f2a33a;
+  --acc-ink: #1a1205;
+  --good: #4ade80;
+  --good-ink: #052e12;
+  --bad: #f87171;
+  --black: #050506;
+  /* the colourful generation progress bar */
+  --prog-1: #f2a33a; --prog-2: #f87171; --prog-3: #c084fc; --prog-4: #38bdf8;
+
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px;
+  --r1: 5px; --r2: 6px; --r3: 8px;
+  --h-sm: 28px; --h-md: 32px; --h-lg: 38px;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px;
+
+  --top-h: 48px;
+  --nav-w: 56px;
+  --list-w: 232px;
+  --inspector-w: 380px;
+  --timeline-h: 168px;
+  --kept-h: 156px;
+}

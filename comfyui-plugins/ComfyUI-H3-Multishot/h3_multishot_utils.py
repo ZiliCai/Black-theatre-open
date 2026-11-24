@@ -1,0 +1,4092 @@
+# -*- coding: utf-8 -*-
+"""H3 multishot utilities - JoyEcho-style single-script prompting for the
+MiniMax H3 chained workflow. One node, no dependencies.
+
+Accepts the same script formats the JoyEcho stack uses:
+  - JSON: {"prompts": ["shot 1 ...", "shot 2 ...", "shot 3 ..."]}
+  - plain text with --- separators between shots
+Feeds up to 4 shot prompts as separate STRING outputs. Missing shots fall
+back to the previous shot's prompt so a 2-shot script still runs a 3-shot
+graph without erroring.
+"""
+import json
+import re
+
+
+
+def _repair_json(text):
+    """Parse JSON, auto-closing unterminated brackets/quotes.
+
+    Long multi-prompt scripts get truncated or lose their final brace all the
+    time (a 4,500-char script with the closing '}' missing is not a typo the
+    author can see). Returns (data, note): data is None on real failure and
+    note carries the error; note is a description when a repair was applied,
+    or "" when the text parsed clean.
+    """
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as e:
+        first_err = str(e)   # bind now; Python clears the except-name on exit
+
+    # walk the text tracking string state, then close what is still open
+    stack, in_str, esc = [], False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack and ((ch == "}" and stack[-1] == "{") or
+                          (ch == "]" and stack[-1] == "[")):
+                stack.pop()
+
+    candidate = text.rstrip()
+    fixes = []
+    if in_str:
+        candidate += '"'
+        fixes.append("closed an open string")
+    if candidate.endswith(","):
+        candidate = candidate[:-1]
+        fixes.append("dropped a trailing comma")
+    # trailing comma before a closer, e.g.  ["a","b",]  or  {"k":1,}
+    cleaned = re.sub(r",(\s*[\]}])", r"\1", candidate)
+    if cleaned != candidate:
+        candidate = cleaned
+        fixes.append("removed comma(s) before a closing bracket")
+    for opener in reversed(stack):
+        candidate += "}" if opener == "{" else "]"
+    if stack:
+        fixes.append("added " + "".join("}" if o == "{" else "]"
+                                        for o in reversed(stack)))
+    if not fixes:
+        return None, first_err
+    try:
+        return json.loads(candidate), ", ".join(fixes)
+    except json.JSONDecodeError as e:
+        return None, str(e)
+
+
+
+_AT_NBANDS = 8
+
+
+def _at_ltas(wav, sr=32000, nfft=2048):
+    """Long-term average spectrum of a [C, L] / [1, C, L] waveform in
+    _AT_NBANDS log-spaced bands (100 Hz .. ~12 kHz). Long-term, so per-shot
+    speech content averages out and only the spectral TILT is measured."""
+    import torch
+    x = wav.reshape(-1, wav.shape[-1]).float().mean(0)
+    n = (x.shape[-1] // nfft) * nfft
+    if n < nfft:
+        return None
+    S = torch.stft(x[:n], nfft, hop_length=nfft // 2,
+                   window=torch.hann_window(nfft), return_complex=True)
+    P = (S.abs() ** 2).mean(-1)
+    f = torch.linspace(0, sr / 2, P.shape[0])
+    edges = torch.logspace(2, 4.08, _AT_NBANDS + 1)
+    out = []
+    for i in range(_AT_NBANDS):
+        m = (f >= edges[i]) & (f < edges[i + 1])
+        out.append(P[m].mean() if m.any() else P.new_tensor(0.0))
+    return torch.stack(out).clamp_min(1e-12)
+
+
+def _at_flatten(wav, house, sr=32000, nfft=2048, max_db=9.0):
+    """EQ-match a shot's long-term spectral envelope to the house envelope.
+
+    The audio twin of _cg_flatten, aimed the other way: chained audio drifts
+    DULLER per hop where chained video drifts sharper. Measured 2026-08-11 on
+    8-shot chains: 4-10 kHz energy fell 84-92% on pure-recency conditioning
+    (bank_pinned=0) and 8-13% even with the pinned slot. Constant per-shot
+    gains applied via STFT - a linear filter, so no pumping. Clamped to
+    +/-max_db, half-strength in the top band so it cannot manufacture hiss
+    where the model genuinely rendered none.
+    """
+    import torch
+    cur = _at_ltas(wav, sr, nfft)
+    if cur is None or house is None:
+        return wav, 0.0
+    gain_db = (10.0 * torch.log10(house / cur)).clamp(-max_db, max_db)
+    gain_db[-1] = gain_db[-1] * 0.5
+    if float(gain_db.abs().max()) < 0.75:
+        return wav, 0.0
+    f = torch.linspace(0, sr / 2, nfft // 2 + 1)
+    edges = torch.logspace(2, 4.08, _AT_NBANDS + 1)
+    centres = (edges[:-1] * edges[1:]).sqrt()
+    logf = torch.log10(f.clamp_min(1.0))
+    logc = torch.log10(centres)
+    idx = torch.bucketize(logf, logc).clamp(1, _AT_NBANDS - 1)
+    x0, x1 = logc[idx - 1], logc[idx]
+    w = ((logf - x0) / (x1 - x0)).clamp(0, 1)
+    curve = 10.0 ** ((gain_db[idx - 1] * (1 - w) + gain_db[idx] * w) / 20.0)
+    shape = wav.shape
+    x = wav.reshape(-1, shape[-1]).float()
+    win = torch.hann_window(nfft)
+    S = torch.stft(x, nfft, hop_length=nfft // 4, window=win,
+                   return_complex=True)
+    S = S * curve.unsqueeze(0).unsqueeze(-1)
+    y = torch.istft(S, nfft, hop_length=nfft // 4, window=win,
+                    length=shape[-1])
+    return y.reshape(shape).to(wav.dtype), float(gain_db.abs().max())
+
+
+def _wav_for_vae(audio_vae, audio, what):
+    """AUDIO dict -> [1, C, L] waveform at the VAE's own sample rate, stereo.
+
+    Mirrors the native node's _encode_ref_audio (nodes_minimax_h3.py): resample
+    to the VAE's rate before encoding. The spine path used to skip this, so a
+    44.1/48 kHz voice file - i.e. nearly every real-world file - was encoded as
+    if it were 32 kHz. The latent was garbage, and because the spine LOCKS the
+    audio stream to that latent at every sampling step, the render came out as
+    static (user-reported on ref2va; the same file worked through the native
+    node, which resamples).
+
+    Mono is upmixed to stereo by duplication - the encoder wants two channels,
+    and refusing a mono file helps nobody.
+    """
+    w = audio["waveform"]
+    sr = int(audio["sample_rate"])
+    w3 = w if w.ndim == 3 else w.unsqueeze(0)
+    vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+    if sr != vae_sr:
+        import torchaudio
+        w3 = torchaudio.functional.resample(w3, sr, vae_sr)
+        print(f"[H3] {what}: resampled {sr} -> {vae_sr} Hz", flush=True)
+    if w3.shape[1] == 1:
+        w3 = w3.repeat(1, 2, 1)
+        print(f"[H3] {what}: mono upmixed to stereo", flush=True)
+    return w3[:1], vae_sr
+
+
+def _write_shot_mp4(imgs, wav, sr, prefix, label, tag):
+    """Write one decoded shot to disk immediately, and never let that kill
+    the render.
+
+    A long chain represents hours of GPU time that only becomes a file at
+    the very end, when the master is muxed. Anything that fails after the
+    last shot - a mux OOM, a full disk, a cancelled tab - has historically
+    destroyed every shot at once (issue #13). Each shot written as it
+    decodes turns that from lost work into a joining job.
+
+    Returns the path written, or None (already reported) on failure.
+    """
+    try:
+        import os
+        from fractions import Fraction
+        import folder_paths
+        from comfy_api.latest import InputImpl, Types
+        w = wav if wav.ndim == 3 else wav.unsqueeze(0)
+        folder, fname, counter, _sub, _pfx = folder_paths.get_save_image_path(
+            prefix, folder_paths.get_output_directory(),
+            imgs.shape[2], imgs.shape[1])
+        path = os.path.join(folder, f"{fname}_{counter:05}_.mp4")
+        InputImpl.VideoFromComponents(Types.VideoComponents(
+            images=imgs.detach().cpu(),
+            audio={"waveform": w.detach().cpu(), "sample_rate": sr},
+            frame_rate=Fraction(24))).save_to(path)
+        print(f"[{tag}] {label} -> {path}", flush=True)
+        return path
+    except Exception as e:
+        print(f"[{tag}] {label} FAILED to save (render continues): {e}",
+              flush=True)
+        return None
+
+
+def _upscale_frames(imgs, scale, model, tag):
+    """Enlarge decoded frames, AFTER sampling. Pixels, never latents.
+
+    The old two-pass path interpolated the raw latent between passes; H3's
+    latent is not spatially smooth, so that landed off-manifold and produced
+    colour noise no matter how the schedule was split. Anything done here is
+    downstream of the VAE, so it cannot leave the manifold - the worst case is
+    a soft picture, not a broken one.
+
+    Per shot, so peak memory is one shot's frames rather than the whole chain.
+    """
+    if model is None and (not scale or abs(scale - 1.0) < 1e-6):
+        return imgs
+    import comfy.utils
+    h, w = int(imgs.shape[1]), int(imgs.shape[2])
+    if model is not None:
+        from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+        imgs = ImageUpscaleWithModel().upscale(model, imgs)[0]
+        print("[%s] upscale: model %dx%d -> %dx%d" %
+              (tag, w, h, int(imgs.shape[2]), int(imgs.shape[1])), flush=True)
+        if scale and abs(scale - 1.0) > 1e-6:
+            # the model has a fixed factor; land on the size actually asked for
+            th, tw = int(round(h * scale)), int(round(w * scale))
+            x = imgs.movedim(-1, 1)
+            x = comfy.utils.common_upscale(x, tw, th, "lanczos", "disabled")
+            imgs = x.movedim(1, -1)
+            print("[%s] upscale: resized to %dx%d" % (tag, tw, th), flush=True)
+        return imgs
+    th, tw = int(round(h * scale)), int(round(w * scale))
+    x = imgs.movedim(-1, 1)
+    x = comfy.utils.common_upscale(x, tw, th, "lanczos", "disabled")
+    print("[%s] upscale: lanczos %dx%d -> %dx%d" % (tag, w, h, tw, th), flush=True)
+    return x.movedim(1, -1)
+
+
+def _smart_head_trim(wav, sr, trim, search_s=0.75):
+    """Remove `trim` samples from a chained shot's audio HEAD, cutting at
+    the QUIETEST spot in the first `search_s` seconds instead of blindly
+    at sample 0.
+
+    The blind head cut clips the attack of any word the model placed at
+    the very start of the shot (the 'blip' - ear-verified on a render
+    2026-08-10: a syllable burst 0.4s after the weld with its front
+    shaved). Cutting the same number of samples out of the quietest
+    window preserves every onset; the audio before the cut plays at most
+    trim/sr (~42ms) late against the video, in a region that is quiet by
+    construction, and sync is exact after the cut. Quietest-window-at-0
+    reproduces the old behaviour bit for bit."""
+    import torch
+    n = wav.shape[-1]
+    if n <= trim:
+        return wav[..., :0]
+    limit = min(n - trim, int(sr * search_s))
+    if limit <= 1:
+        return wav[..., trim:]
+    mono = wav.float().abs()
+    while mono.ndim > 1:
+        mono = mono.mean(0)
+    sq = mono[:limit + trim] ** 2
+    cs = torch.cumsum(torch.cat([torch.zeros(1, device=sq.device), sq]), 0)
+    win_energy = cs[trim:limit + trim] - cs[:limit]
+    i = int(win_energy.argmin())
+    if i > 0:
+        print(f"[H3Multishot] smart weld: seam cut moved {i / sr * 1000:.0f}ms "
+              f"into the head (quietest gap), word onsets preserved",
+              flush=True)
+    return torch.cat([wav[..., :i], wav[..., i + trim:]], dim=-1)
+
+
+def _xfade_audio(parts, sr, ms=40):
+    """Concatenate shot audio with a short equal-power crossfade at each seam.
+
+    Each shot is sampled independently, so its waveform starts and ends at a
+    hard boundary. Butt-joining them puts a step discontinuity in the signal at
+    every seam, which reads as a click and as "spliced clips" to a listener.
+    A ~40ms equal-power fade removes the step without audibly shortening
+    anything.
+    """
+    import torch
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    n = max(1, int(sr * ms / 1000.0))
+    out = parts[0]
+    for nxt in parts[1:]:
+        k = min(n, out.shape[-1], nxt.shape[-1])
+        if k < 8:                      # too short to fade; butt-join
+            out = torch.cat([out, nxt], dim=-1)
+            continue
+        t = torch.linspace(0, 1, k, dtype=out.dtype, device=out.device)
+        fade_out = torch.cos(t * 3.14159265 / 2)   # equal power
+        fade_in = torch.sin(t * 3.14159265 / 2)
+        head, tail = out[..., :-k], out[..., -k:]
+        seam = tail * fade_out + nxt[..., :k] * fade_in
+        out = torch.cat([head, seam, nxt[..., k:]], dim=-1)
+    return out
+
+
+def _parse_script(text):
+    """JoyEcho script -> list of shot prompts. JSON {"prompts": [...]} or
+    plain text with --- separators. Malformed JSON fails LOUD."""
+    text = (text or "").strip()
+    shots = []
+    if text.startswith("{") or text.startswith("["):
+        data, repaired = _repair_json(text)
+        if data is None:
+            raise ValueError(
+                f"H3 script looks like JSON but does not parse ({repaired}). "
+                f"Auto-repair of unclosed brackets/quotes was attempted and "
+                f"failed. Common cause: a doubled {{ on the first lines, or a "
+                f"missing comma between prompts. Fix the script or use plain "
+                f"prompts separated by --- lines.")
+        if repaired:
+            print(f"[H3Multishot] script JSON was incomplete; auto-repaired "
+                  f"({repaired}). Consider fixing the source.", flush=True)
+        if isinstance(data, dict):
+            shots = [str(p) for p in data.get("prompts", [])]
+        elif isinstance(data, list):
+            shots = [str(p) for p in data]
+    if not shots:
+        shots = [b.strip().replace('\\"', '"')
+                 for b in re.split(r"(?m)^---\s*$", text) if b.strip()]
+    if not shots:
+        shots = [text]
+    return shots
+
+
+class H3ScriptSplit:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"script": ("STRING", {
+            "multiline": True, "dynamicPrompts": False,
+            "default": "Shot 1 prompt goes here.\n---\n"
+                       "Shot 2 prompt goes here.\n---\n"
+                       "Shot 3 prompt goes here.",
+            "tooltip": "One prompt per shot, separated by --- on its own "
+                       "line. (JSON {\"prompts\": [...]} also accepted, for "
+                       "generated scripts.)"}),
+            "shot_count": ("INT", {
+                "default": 0, "min": 0, "max": 3,
+                "tooltip": "This workflow ALWAYS renders 3 segments and "
+                           "joins them (~30s master). 0 = count from the "
+                           "script. 3 = three scenes. 2 = the third segment "
+                           "continues scene 2. 1 = one scene sustained for "
+                           "the full 30s. Scripts with >3 prompts: extras "
+                           "are dropped (see console)."}),
+        }}
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "INT")
+    RETURN_NAMES = ("shot_1", "shot_2", "shot_3", "shot_4", "shot_count")
+    FUNCTION = "split"
+    CATEGORY = "conditioning/minimax"
+
+    def split(self, script, shot_count=0):
+        shots = _parse_script(script)
+        if shot_count and shot_count > 0:
+            if len(shots) > shot_count:
+                print(f"[H3ScriptSplit] shot_count={shot_count}: dropping "
+                      f"{len(shots) - shot_count} extra script shot(s).",
+                      flush=True)
+                shots = shots[:shot_count]
+            while len(shots) < shot_count:
+                shots.append(shots[-1])
+        n = len(shots)
+        if n < 3:
+            print(f"[H3ScriptSplit] script has {n} shot(s); a 3-shot graph "
+                  f"will render the last prompt {3 - n} extra time(s) as a "
+                  f"continuation.", flush=True)
+        elif n > 3:
+            print(f"[H3ScriptSplit] script has {n} shots; a 3-shot graph "
+                  f"DROPS shot(s) 4+. Trim the script or wait for the "
+                  f"dynamic-count workflow.", flush=True)
+        while len(shots) < 4:
+            shots.append(shots[-1])
+        return (shots[0], shots[1], shots[2], shots[3], n)
+
+
+# ---------------------------------------------------------------------------
+# AUTO ACTIVATION RESERVE
+#
+# VRAM has two tenants with opposite tolerance for being remote. WEIGHTS
+# stream well: sequential, known order, prefetched behind ~50s of compute per
+# step, so 20GB offloaded costs well under a second. The ALLOCATOR POOL
+# (activations) does not stream: it is random-access and re-touched all step,
+# and when it does not fit, the driver evicts blind mid-step. Measured on a
+# 3090: starving the pool by ~3GB = 533 s/it vs 99 s/it. Measured on a 5090:
+# 168W at "99% utilisation" - a card waiting, not computing.
+#
+# So the correct split is reserve >= pool, and stream whatever weights do not
+# fit - overshooting is nearly free, undershooting is 5-10x. The pool scales
+# with the render shape, which is why any hand-set number (a GB figure, a
+# memory_usage_factor) is correct for exactly one resolution and a trap at
+# every other: LOWER the resolution with a fixed factor and the reserve
+# shrinks below the pool - the render gets SLOWER, the opposite of what any
+# person expects.
+#
+# This engine removes the knob:
+#   - memory_required(input_shape) is overridden with a function of the
+#     ACTUAL shape comfy passes at load time - never a constant.
+#   - Unmeasured shapes reserve 60% of currently-free VRAM: generous enough
+#     to be cliff-proof at any resolution, and only slightly slower than
+#     optimal (a few more GB of weights stream).
+#   - Our samplers measure the true allocator peak of every run and cache it
+#     per (GPU, model, shape-cells) in the user dir. From the second run at
+#     a shape, the reserve is measured * 1.25 - per machine, no telemetry to
+#     read, no number to know.
+# ---------------------------------------------------------------------------
+
+_AUTO_FLOOR = 8 * 1024**3          # never reserve less: workspaces + margin
+# First-run fraction of free VRAM. Deliberately HIGH: over-reserving merely
+# streams more weights (<1s/step behind 50-100s of compute), while
+# under-reserving is the 5-10x cliff. 0.60 was calibrated on a 32GB card and
+# proved WRONG on a 24GB one: 60% of the 3090's 21.9GB free = 13.2GB against
+# a ~17.5GB pool -> max_reserved 25.06GB on a 24GB card -> 492 s/it. At 0.88
+# the same card reserves 19.3GB and streams the difference. Measurement then
+# tightens DOWN from the safe side.
+_AUTO_FRACTION = 0.88              # unmeasured shapes: fraction of free VRAM
+_AUTO_WEIGHT_NUCLEUS = 2 * 1024**3  # always leave a little room for weights
+_AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
+_auto_cache = None                 # lazy {key: pool_bytes}
+_auto_last = {"key": None, "model": None}   # what the next sampling run is
+_auto_session = {}                 # key -> reserve pinned for this session
+
+
+def _auto_cache_path():
+    try:
+        import folder_paths
+        base = folder_paths.get_user_directory()
+    except Exception:
+        import os
+        base = os.path.dirname(os.path.abspath(__file__))
+    import os
+    return os.path.join(base, "h3_auto_reserve.json")
+
+
+def _auto_cache_load():
+    global _auto_cache
+    if _auto_cache is None:
+        import io as _io, os
+        _auto_cache = {}
+        p = _auto_cache_path()
+        if os.path.isfile(p):
+            try:
+                _auto_cache = json.load(_io.open(p, encoding="utf-8"))
+            except Exception:
+                _auto_cache = {}
+    return _auto_cache
+
+
+def _auto_cache_store(key, pool_bytes):
+    cache = _auto_cache_load()
+    prev = cache.get(key, 0)
+    # keep the largest pool ever seen for the shape; shrinking on a lucky
+    # run risks the cliff on the next unlucky one
+    if pool_bytes <= prev:
+        return
+    cache[key] = int(pool_bytes)
+    try:
+        import io as _io
+        _io.open(_auto_cache_path(), "w", encoding="utf-8").write(
+            json.dumps(cache, indent=1))
+    except Exception as e:
+        print(f"[H3AutoReserve] cache write failed ({e}) - measurements "
+              f"will not persist across restarts", flush=True)
+
+
+_auto_payload = {"sig": ""}
+
+
+def _auto_set_payload(sig):
+    """Samplers call this before each shot with a conditioning-payload
+    signature (keyframes / reference blocks / audio refs). Two shots with
+    the same latent shape but different payloads need DIFFERENT pools -
+    render-verified 2026-08-10: shot 1 (bare) measured a 4.9 GB pool,
+    shot 2 (chain keyframe + 10s self-anchor audio ref) then spilled to
+    system RAM at that reserve and ran 5x slower per step."""
+    _auto_payload["sig"] = str(sig or "")
+
+
+def _auto_key(model_name, cells, sig=None):
+    try:
+        import torch
+        dev = torch.cuda.get_device_name(0)
+    except Exception:
+        dev = "cpu"
+    import os
+    stem = os.path.splitext(os.path.basename(model_name))[0]
+    s = _auto_payload["sig"] if sig is None else sig
+    return f"{dev}|{stem}|{cells}|{s}"
+
+
+def _install_auto_reserve(patcher, model_name):
+    """Shape-aware memory_required on the BaseModel (clone-safe)."""
+
+    def memory_required(input_shape, *args, **kwargs):
+        cells = 1
+        try:
+            for d in list(input_shape)[1:]:
+                cells *= int(d)
+        except Exception:
+            cells = 0
+        key = _auto_key(model_name, cells)
+        _auto_last["key"] = key
+        # comfy (and DynamicVRAM) call memory_required repeatedly - per load
+        # AND per sampling step. The answer must be STABLE for a shape:
+        # recomputing "60% of free" as free shrinks is a feedback loop
+        # (reserving memory reduces free, which reduces the next answer).
+        # Pin the first computation per (model, shape) for the session;
+        # a fresh measurement invalidates the pin.
+        pinned = _auto_session.get(key)
+        if pinned is not None:
+            return pinned
+        cache = _auto_cache_load()
+        measured = cache.get(key)
+        if measured:
+            # a real measurement carries its own x1.25 margin - the old
+            # 8 GB floor here overrode good small measurements and forced
+            # weight offload on 24 GB cards for nothing
+            reserve = max(int(measured * _AUTO_MARGIN), 2 * 1024**3)
+            how = f"measured pool {measured/2**30:.1f} GB x {_AUTO_MARGIN}"
+        else:
+            # unmeasured payload variant of a measured shape: estimate from
+            # the sibling instead of guessing from free VRAM. Reference and
+            # keyframe tokens ride every step; x1.6 covered the measured
+            # bare->payload jump with margin.
+            sib = None
+            prefix = key.rsplit("|", 1)[0] + "|"
+            for k2, v2 in cache.items():
+                if k2.startswith(prefix) and v2:
+                    sib = max(sib or 0, v2)
+            if sib:
+                reserve = max(int(sib * 1.6 * _AUTO_MARGIN), _AUTO_FLOOR)
+                how = (f"payload variant of a measured shape: sibling pool "
+                       f"{sib/2**30:.1f} GB x 1.6 x {_AUTO_MARGIN}")
+            else:
+                try:
+                    import comfy.model_management as mm
+                    free = mm.get_free_memory(mm.get_torch_device())
+                except Exception:
+                    free = 24 * 1024**3
+                reserve = max(int(min(free * _AUTO_FRACTION,
+                                      free - _AUTO_WEIGHT_NUCLEUS)),
+                              _AUTO_FLOOR)
+                how = (f"first run at this shape: "
+                       f"{_AUTO_FRACTION:.0%} of free")
+        _auto_session[key] = reserve
+        print(f"[H3AutoReserve] shape cells={cells}: reserving "
+              f"{reserve/2**30:.1f} GB ({how})", flush=True)
+        return reserve
+
+    patcher.model.memory_required = memory_required
+    patcher.memory_required = memory_required
+    _auto_last["model"] = model_name
+
+
+def _auto_measure_begin():
+    """Call right before sampling: snapshot the allocator + clock."""
+    import time as _t
+    try:
+        import torch
+        torch.cuda.reset_peak_memory_stats()
+        return {"res": torch.cuda.memory_reserved(), "t0": _t.time()}
+    except Exception:
+        return {"res": None, "t0": _t.time()}
+
+
+def _auto_measure_end(before, patcher=None, steps=None):
+    """Call right after sampling: cache the real pool, and DETECT the two
+    silent failure modes by name - a system-RAM spill (peak at the card's
+    ceiling + step time collapsed) used to present as an unexplained 5-10x
+    slowdown with nothing in the log."""
+    import time as _t
+    if not isinstance(before, dict):
+        before = {"res": before, "t0": None}
+    key = _auto_last["key"]
+    if key is None:
+        return
+    # ---- step-time tracking (works even when CUDA stats are unavailable)
+    sit = None
+    if before.get("t0") and steps:
+        sit = (_t.time() - before["t0"]) / max(1, int(steps))
+        base_key = "sit|" + key.rsplit("|", 1)[0]   # same shape, any payload
+        best = _auto_session.get(base_key)
+        if best is None or sit < best:
+            _auto_session[base_key] = sit
+        elif best > 0 and sit > 2.5 * best:
+            print(f"[H3AutoReserve] SLOWDOWN: {sit:.0f}s/step vs "
+                  f"{best:.0f}s/step earlier this session ({sit/best:.1f}x). "
+                  f"This is the VRAM-spill signature: the driver is paging "
+                  f"to system RAM instead of erroring. Fix: raise the "
+                  f"activation reserve, drop resolution/frames, or remove "
+                  f"reference payload (audio refs / keyframes ride every "
+                  f"step).", flush=True)
+    if before.get("res") is None:
+        return
+    try:
+        import torch
+        peak = torch.cuda.max_memory_reserved()
+        total = torch.cuda.get_device_properties(0).total_memory
+        if peak >= total * 0.97:
+            print(f"[H3AutoReserve] WARNING: peak reserved "
+                  f"{peak/2**30:.1f} GB of {total/2**30:.1f} GB - the "
+                  f"allocator hit the card's ceiling; any overflow was "
+                  f"paged to system RAM by the driver (silent, slow).",
+                  flush=True)
+        loaded = 0
+        try:
+            loaded = int(patcher.loaded_size()) if patcher is not None else 0
+        except Exception:
+            try:
+                loaded = int(getattr(patcher.model,
+                                     "model_loaded_weight_memory", 0))
+            except Exception:
+                loaded = 0
+        pool = peak - before["res"] - loaded
+        if pool > 512 * 1024**2:            # ignore no-op runs
+            _auto_cache_store(key, pool)
+            _auto_session.pop(key, None)     # re-pin from measured
+            print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB for "
+                  f"this shape+payload (peak {peak/2**30:.1f} - weights "
+                  f"{loaded/2**30:.1f}) - next run reserves "
+                  f"{max(pool*_AUTO_MARGIN, 2*1024**3)/2**30:.1f} GB",
+                  flush=True)
+    except Exception:
+        pass
+
+
+class H3ModelLoaderAny:
+    """One dropdown, both formats: .safetensors loads through comfy core,
+    .gguf routes through ComfyUI-GGUF (patched for minimax_h3). Keeps the
+    published workflow at exactly one loader node."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        import folder_paths
+        import os
+        files = folder_paths.get_filename_list("diffusion_models")
+        gguf = []
+        for d in folder_paths.get_folder_paths("diffusion_models"):
+            if not os.path.isdir(d):
+                continue
+            # RECURSIVE: .gguf is not in supported_pt_extensions so
+            # get_filename_list never returns it, and a flat listdir misses
+            # anything filed under diffusion_models/gguf/.
+            for root, _dirs, fs in os.walk(d):
+                for f in fs:
+                    if f.lower().endswith(".gguf"):
+                        gguf.append(os.path.relpath(os.path.join(root, f), d))
+        names = sorted(set(files) | set(gguf))
+        return {"required": {"model_name": (names, {
+            "tooltip": "safetensors or GGUF - loader routes automatically."})},
+            "optional": {"activation_reserve_gb": ("FLOAT", {
+                "default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
+                "tooltip": "0 = AUTO (recommended). The pack sizes the "
+                "activation reserve for the actual render shape, measures the "
+                "real peak each run, and tightens itself per machine - lower "
+                "resolutions get faster automatically. Set a number only to "
+                "pin the reserve by hand; that number is for ONE resolution "
+                "and the wrong number is 5-10x slower, not a little slower."})}}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load"
+    CATEGORY = "loaders/minimax"
+
+    def load(self, model_name, activation_reserve_gb=0.0):
+        out = self._load_inner(model_name)
+        patcher = out[0]
+        # stash the checkpoint name so samplers can check task compatibility
+        # (fl2va = first/last-frame hand-off, ref2va = reference rows). The
+        # wrong pairing does not error - it silently underperforms.
+        try:
+            patcher.model.h3_checkpoint_name = str(model_name)
+        except Exception:
+            pass
+        if activation_reserve_gb and activation_reserve_gb > 0:
+            _cap = int(activation_reserve_gb * (1024 ** 3))
+            # Must live on the inner BaseModel, not the ModelPatcher: LoRA
+            # stacks and guiders clone() the patcher before sampling and an
+            # instance attribute does not survive the clone, silently
+            # restoring comfy's estimate. Clones share this BaseModel.
+            patcher.model.memory_required = lambda *a, _c=_cap, **k: _c
+            patcher.memory_required = lambda *a, _c=_cap, **k: _c
+            print(f"[H3ModelLoader] activation reserve PINNED at "
+                  f"{activation_reserve_gb:.1f} GB (manual - correct for one "
+                  f"resolution only; 0 = auto adapts to any)", flush=True)
+        else:
+            _install_auto_reserve(patcher, model_name)
+        return out
+
+    def _load_inner(self, model_name):
+        import folder_paths
+        if model_name.lower().endswith(".gguf"):
+            # resolve the live UnetLoaderGGUF from the global registry -
+            # custom node packages load under mangled module names, so the
+            # registry is the only stable handle.
+            import nodes as core_nodes
+            cls = core_nodes.NODE_CLASS_MAPPINGS.get("UnetLoaderGGUF")
+            if cls is None:
+                raise RuntimeError(
+                    "ComfyUI-GGUF not loaded - install/enable it and restart.")
+            # ComfyUI-GGUF rejects unknown architectures before reading any
+            # tensor, and upstream does not know minimax_h3. Import-time
+            # patching covers the packaged install; re-assert here in case
+            # ComfyUI-GGUF loaded after us. The relative import only exists
+            # in the packaged install - LOOSE-FILE installs (this file
+            # dropped straight into custom_nodes/) have no parent package,
+            # so fall back to doing the patch inline.
+            try:
+                from .h3_gguf_arch import ensure_minimax_arch
+                ensure_minimax_arch()
+            except ImportError:
+                import sys as _sys
+                for _m in list(_sys.modules.values()):
+                    try:
+                        if (_m is not None
+                                and isinstance(getattr(_m, "IMG_ARCH_LIST",
+                                                       None), set)
+                                and hasattr(_m, "TXT_ARCH_LIST")):
+                            if "minimax_h3" not in _m.IMG_ARCH_LIST:
+                                _m.IMG_ARCH_LIST.add("minimax_h3")
+                                print("[H3ModelLoader] taught ComfyUI-GGUF "
+                                      "the 'minimax_h3' architecture (in "
+                                      "memory, loose-file fallback)",
+                                      flush=True)
+                            break
+                    except Exception:
+                        continue
+            return cls().load_unet(model_name)
+        import comfy.sd
+        path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
+        return (comfy.sd.load_diffusion_model(path),)
+
+
+_UPSCALER_UTILS = None
+
+
+def _load_upscaler_utils():
+    """Load ComfyUI-MiniMaxH3_LatentUpscaler's utils.py by path (cached).
+
+    Two-pass upscale reuses that pack's NestedTensor upscale + CONST re-noise
+    math rather than duplicating it. Works whether this file is installed
+    loose in custom_nodes or inside ComfyUI-H3-Multishot/.
+    """
+    global _UPSCALER_UTILS
+    if _UPSCALER_UTILS is not None:
+        return _UPSCALER_UTILS
+    import importlib.util
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"),
+        os.path.join(os.path.dirname(here),
+                     "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"),
+    ]
+    try:
+        import folder_paths
+        for d in folder_paths.get_folder_paths("custom_nodes"):
+            candidates.append(
+                os.path.join(d, "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"))
+    except Exception:
+        pass
+    for path in candidates:
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location(
+                "h3_latent_upscaler_utils", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _UPSCALER_UTILS = mod
+            return mod
+    raise RuntimeError(
+        "two_pass_upscale needs the ComfyUI-MiniMaxH3_LatentUpscaler pack "
+        "(github.com/Tr1dae/ComfyUI-MiniMaxH3_LatentUpscaler) installed in "
+        "custom_nodes - it provides the NestedTensor upscale/re-noise math.")
+
+
+def _upscale_av_exact(tr, latent_dict, target_h, target_w):
+    """Spatially upscale the VIDEO member of an AV latent to EXACT latent dims.
+
+    The pack's own upscaler works from a single scale_by, which can round to a
+    grid one cell off the requested resolution; sampling to a fixed widget
+    resolution needs exact dims so every shot decodes to width x height.
+    """
+    import torch.nn.functional as F
+    members, was_nested = tr.extract_tensor(latent_dict["samples"])
+    v = members[0]
+    orig = tuple(v.shape)
+    x = v
+    if len(orig) > 4:  # [B,C,T,H,W] -> [B*T,C,H,W]
+        x = x.reshape(orig[0], orig[1], -1, orig[-2], orig[-1])
+        x = x.movedim(2, 1).reshape(-1, orig[1], orig[-2], orig[-1])
+    x = F.interpolate(x, size=(target_h, target_w), mode="bilinear",
+                      align_corners=False)
+    if len(orig) > 4:
+        x = x.reshape(orig[0], -1, orig[1], target_h, target_w).movedim(2, 1)
+    out = latent_dict.copy()
+    out["samples"] = tr.wrap_tensor([x, *members[1:]], was_nested=was_nested)
+    return out
+
+
+
+# ---------------------------------------------------------------------------
+# Chain gain control (seam sharpening)
+#
+# MEASURED 2026-08-08 on 6 real multishot renders, both rigs, no LoRA: every
+# content-continuous seam steps UP in texture energy by +25..47% (5-7x the
+# non-seam control), and because each shot tail becomes the next shot keyframe
+# anchor, the level COMPOUNDS - a 6-shot chain measured 3.3x sharper by its
+# last shot than its first. The loop: anchor at level L -> the model generates
+# its continuation at ~1.25-1.47 x L -> that output tail is the next anchor.
+# Gain > 1 in an autoregressive loop ratchets.
+#
+# These helpers measure texture energy (variance of a 3x3 Laplacian on luma)
+# and apply a separable gaussian, so the chain can be level-controlled.
+# ---------------------------------------------------------------------------
+
+def _cg_lap_var(img):
+    """CONTRAST-NORMALISED texture energy of an IMAGE batch [B,H,W,C] in 0..1.
+
+    var(laplacian) / var(luma). The raw laplacian scales with local contrast,
+    so on its own it cannot tell "the shot got brighter" from "the shot got
+    sharper" - and a leveller driven by it chases exposure instead of detail
+    (measured: it held the answering-machine scene flat, whose contrast was
+    steady, and missed a 2.7x drift in the dim coma scene, whose contrast
+    swung 0.13-0.19). Dividing by the frame's own variance measures detail
+    SCALE, which is what must stay constant across a chain.
+
+    Letterbox bars are excluded - pure black borders would drag both terms.
+    """
+    import torch
+    import torch.nn.functional as F
+    x = img if img.ndim == 4 else img.unsqueeze(0)
+    g = (x[..., 0] * 0.299 + x[..., 1] * 0.587 + x[..., 2] * 0.114).unsqueeze(1)
+    if g.shape[-1] > 8 and g.shape[-2] > 8:
+        mx_r = g.amax(dim=(0, 1, 3)) > 0.02      # rows with any signal
+        mx_c = g.amax(dim=(0, 1, 2)) > 0.02      # cols with any signal
+        if bool(mx_r.any()) and bool(mx_c.any()):
+            g = g[:, :, mx_r][:, :, :, mx_c]
+    k = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]],
+                     dtype=g.dtype, device=g.device).view(1, 1, 3, 3)
+    lap = float(F.conv2d(g, k, padding=1).var())
+    con = float(g.var())
+    return lap / max(con, 1e-9)
+
+
+def _cg_gauss(img, sigma):
+    """Separable gaussian blur on an IMAGE batch [B,H,W,C]."""
+    import torch
+    import torch.nn.functional as F
+    if sigma <= 0:
+        return img
+    r = max(1, int(round(sigma * 3)))
+    xs = torch.arange(-r, r + 1, dtype=img.dtype, device=img.device)
+    k = torch.exp(-(xs ** 2) / (2 * sigma * sigma))
+    k = k / k.sum()
+    v = img.permute(0, 3, 1, 2)                      # [B,C,H,W]
+    c = v.shape[1]
+    kh = k.view(1, 1, 1, -1).expand(c, 1, 1, k.numel())
+    v = F.conv2d(F.pad(v, (r, r, 0, 0), mode="reflect"), kh, groups=c)
+    kv = k.view(1, 1, -1, 1).expand(c, 1, k.numel(), 1)
+    v = F.conv2d(F.pad(v, (0, 0, r, r), mode="reflect"), kv, groups=c)
+    return v.permute(0, 2, 3, 1).clamp(0, 1)
+
+
+def _cg_sigma_for(img, target_lap, max_sigma=1.6):
+    """Smallest gaussian sigma bringing img texture energy down to target."""
+    if target_lap <= 0:
+        return 0.0
+    # fine steps: the lap response to sigma is steep below ~0.7, so a coarse
+    # grid overshoots badly (measured on synthetic texture: 0.3 -> 0.97x but
+    # 0.6 -> 0.31x). 0.05 keeps the landing within a few percent.
+    best_s, best_d = 0.0, abs(_cg_lap_var(img) - target_lap)
+    s = 0.05
+    while s <= max_sigma + 1e-9:
+        d = abs(_cg_lap_var(_cg_gauss(img, s)) - target_lap)
+        if d < best_d:
+            best_d, best_s = d, s
+        s += 0.05
+    return best_s
+
+
+
+def _cg_flatten(imgs, target, block=8, max_sigma=1.6):
+    """Level a shot to a constant texture energy: blur only, per block.
+
+    Sigma is searched on one representative frame per block (cheap) and then
+    smoothed across blocks so the correction cannot pump frame to frame.
+    Frames already at or below target are left untouched - this never
+    sharpens, so it can only remove drift, never invent detail.
+    """
+    import torch
+    n = imgs.shape[0]
+    if n == 0 or target <= 0:
+        return imgs, 0.0
+    idx = list(range(0, n, block))
+    sig = []
+    for i in idx:
+        f = imgs[i:i + 1]
+        sig.append(_cg_sigma_for(f, target, max_sigma)
+                   if _cg_lap_var(f) > target * 1.02 else 0.0)
+    # smooth (moving average of 3) so sigma cannot jump between blocks
+    sm = []
+    for j in range(len(sig)):
+        lo, hi = max(0, j - 1), min(len(sig), j + 2)
+        sm.append(sum(sig[lo:hi]) / (hi - lo))
+    if max(sm) <= 0.0:
+        return imgs, 0.0
+    out = imgs.clone()
+    for j, i in enumerate(idx):
+        s = sm[j]
+        if s > 0.02:
+            out[i:i + block] = _cg_gauss(imgs[i:i + block], s)
+    return out, (sum(sm) / len(sm))
+
+
+def _sampler_names():
+    """From core, so the list cannot rot out of step with ComfyUI."""
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SAMPLERS)
+    except Exception:
+        return ["res_multistep", "euler", "dpmpp_2m"]
+
+
+def _scheduler_names():
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SCHEDULERS)
+    except Exception:
+        return ["simple", "normal", "beta"]
+
+
+class H3ClipLoaderAny:
+    """One dropdown for text encoders, both formats: .safetensors through
+    comfy core CLIPLoader, .gguf through ComfyUI-GGUF's CLIPLoaderGGUF
+    (which auto-pairs a matching -mmproj sidecar for vision)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        import os
+        import folder_paths
+        files = set(folder_paths.get_filename_list("text_encoders"))
+        for d in folder_paths.get_folder_paths("text_encoders"):
+            if not os.path.isdir(d):
+                continue
+            # RECURSIVE, same reason as the model loader above.
+            for root, _dirs, fs in os.walk(d):
+                for f in fs:
+                    if f.lower().endswith(".gguf") and "mmproj" not in f.lower():
+                        files.add(os.path.relpath(os.path.join(root, f), d))
+        mm = ["(auto)"]
+        for d in folder_paths.get_folder_paths("text_encoders"):
+            if not os.path.isdir(d):
+                continue
+            for root, _dirs, fs in os.walk(d):
+                for f in fs:
+                    if f.lower().endswith(".gguf") and "mmproj" in f.lower():
+                        mm.append(os.path.relpath(os.path.join(root, f), d))
+        import nodes as core_nodes
+        types = core_nodes.CLIPLoader.INPUT_TYPES()["required"]["type"]
+        return {"required": {
+            "clip_name": (sorted(files), {
+                "tooltip": "safetensors or GGUF - routed automatically. GGUF "
+                           "encoders auto-pair their -mmproj vision sidecar."}),
+            "type": types,
+        }, "optional": {
+            # NEW WIDGETS APPEND LAST - inserting above shifts every saved
+            # workflow's values by one slot.
+            "mmproj_name": (mm, {
+                "default": "(auto)",
+                "tooltip": "Vision sidecar for a GGUF encoder. '(auto)' uses "
+                           "ComfyUI-GGUF's pairing, which matches on FILENAME "
+                           "inside the encoder's own folder - rename either "
+                           "file, or split them across folders, and the match "
+                           "fails. If auto finds nothing and exactly one "
+                           "mmproj sits beside the encoder, that one is used "
+                           "anyway. Pick a file here to override entirely; "
+                           "then names and folders do not matter."}),
+        }}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load"
+    CATEGORY = "loaders/minimax"
+
+    # llama.cpp/qwen2vl-era names -> the H3 encoder's exact visual.* layout
+    # (established 2026-08-04 against the official int8 file). Ordered, and
+    # chosen so no rule can re-hit another rule's output.
+    _VISION_FIXES = [
+        ("visual.merger.ln_q.", "visual.merger.norm."),
+        ("attn_qkv.", "attn.qkv."),
+        ("mlp.up_proj.", "mlp.linear_fc1."),
+        ("mlp.down_proj.", "mlp.linear_fc2."),
+        (".fc1.", ".linear_fc1."),
+        (".fc2.", ".linear_fc2."),
+        ("v.position_embd.weight", "visual.pos_embed.weight"),
+    ]
+
+    def load(self, clip_name, type, mmproj_name="(auto)"):
+        import os
+        import re
+        import sys
+        import nodes as core_nodes
+        if not clip_name.lower().endswith(".gguf"):
+            return core_nodes.CLIPLoader().load_clip(clip_name, type=type)
+
+        gg_cls = core_nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderGGUF")
+        if gg_cls is None:
+            raise RuntimeError(
+                "ComfyUI-GGUF not loaded - install/enable it and restart.")
+        gg = sys.modules[gg_cls.__module__]
+        # gguf_mmproj_loader lives in their loader module, which nodes.py
+        # does not re-export - resolve it from where gguf_clip_loader is
+        # actually defined.
+        gg_loader = sys.modules[gg.gguf_clip_loader.__module__]
+
+        import folder_paths
+        import comfy.sd
+        import comfy.model_management
+        clip_path = folder_paths.get_full_path("clip", clip_name)
+
+        # --- text side: their mapper, then truncate to the official H3
+        # shape (Qwen3-VL-32B cut to 50 layers; no final norm, no lm_head).
+        sd = gg.gguf_clip_loader(clip_path)
+        drop = re.compile(r"model\.layers\.(5[0-9]|6[0-9])\.")
+        sd = {k: v for k, v in sd.items()
+              if not drop.match(k) and k not in ("model.norm.weight",
+                                                 "lm_head.weight")}
+
+        # --- vision side: their sidecar loader, then correct the names to
+        # H3's layout (their map is qwen2vl-era: wrong merger keys, missing
+        # deepstack and qkv rules).
+        # Upstream pairs the sidecar by FILENAME inside the encoder's own
+        # folder (gguf_mmproj_loader: strip quant suffix, substring match),
+        # so a rename on either file - or splitting them across folders -
+        # breaks the pair. Upstream then logs an error and returns {}, which
+        # renders as "the model ignores my reference image". Three ways out,
+        # in order, and a hard failure rather than a silent one.
+        vsd = None
+        if mmproj_name and mmproj_name != "(auto)":
+            mm_path = folder_paths.get_full_path("text_encoders", mmproj_name)
+            if not mm_path:
+                raise RuntimeError(
+                    f"mmproj_name '{mmproj_name}' is not in the "
+                    f"text_encoders folder any more.")
+            vsd, _ = gg_loader.gguf_sd_loader(mm_path, is_text_model=True)
+            print(f"[H3ClipLoader] vision sidecar (explicit): {mmproj_name}",
+                  flush=True)
+        else:
+            vsd = gg_loader.gguf_mmproj_loader(clip_path)
+            if not vsd:
+                # upstream's name match failed; if exactly one mmproj sits
+                # beside the encoder the intent is unambiguous, so use it
+                _dir = os.path.dirname(clip_path)
+                cands = [f for f in os.listdir(_dir)
+                         if f.lower().endswith(".gguf")
+                         and "mmproj" in f.lower()]
+                if len(cands) == 1:
+                    vsd, _ = gg_loader.gguf_sd_loader(
+                        os.path.join(_dir, cands[0]), is_text_model=True)
+                    print(f"[H3ClipLoader] filename pairing failed, but "
+                          f"'{cands[0]}' is the only mmproj beside the "
+                          f"encoder - using it. Set mmproj_name to silence "
+                          f"this.", flush=True)
+        if not vsd:
+            raise RuntimeError(
+                f"No vision sidecar (-mmproj) resolved for '{clip_name}'. "
+                f"The H3 encoder NEEDS its vision tower for image "
+                f"references and shot chaining. Either keep the mmproj file "
+                f"beside the encoder with a matching name, or just pick it "
+                f"explicitly in this node's mmproj_name widget - with that "
+                f"set, names and folders do not matter.")
+        # merger mlp indices -> linear_fc1/2 by ascending index
+        idxs = sorted({m.group(1) for k in vsd
+                       for m in [re.match(r"visual\.merger\.mlp\.(\d+)\.", k)]
+                       if m})
+        # deepstack mergers: llama.cpp indexes them by the vision layer they
+        # tap (8/16/24), the H3 encoder by list position (0/1/2) - remap
+        # ascending, and sort NUMERICALLY (lexically 16 < 8).
+        ds = sorted({int(m.group(1)) for k in vsd
+                     for m in [re.match(r"v\.deepstack\.(\d+)\.", k)]
+                     if m})
+        fixed = {}
+        for k, v in vsd.items():
+            for i, name in zip(idxs, ("linear_fc1", "linear_fc2")):
+                k = k.replace(f"visual.merger.mlp.{i}.",
+                              f"visual.merger.{name}.")
+            for pos, layer in enumerate(ds):
+                k = k.replace(f"v.deepstack.{layer}.",
+                              f"visual.deepstack_merger_list.{pos}.")
+            for a, b in self._VISION_FIXES:
+                k = k.replace(a, b)
+            fixed[k] = v
+        sd.update(fixed)
+
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_type=getattr(comfy.sd.CLIPType, type.upper(),
+                              comfy.sd.CLIPType.STABLE_DIFFUSION),
+            state_dicts=[sd],
+            model_options={
+                "custom_operations": gg.GGMLOps,
+                "initial_device":
+                    comfy.model_management.text_encoder_offload_device(),
+            },
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+        clip.patcher = gg.GGUFModelPatcher.clone(clip.patcher)
+        return (clip,)
+
+
+class H3AudioTrimStart:
+    """Trim N seconds off the FRONT of an audio clip. Exists so the multishot
+    master can drop each chained shot's duplicated first frame (1/24s) from
+    video AND audio together, keeping lip sync exact across seams."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "audio": ("AUDIO",),
+            "seconds": ("FLOAT", {"default": 0.04167, "min": 0.0, "max": 10.0,
+                                  "step": 0.00001}),
+        }}
+
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "trim"
+    CATEGORY = "audio"
+
+    def trim(self, audio, seconds):
+        sr = audio["sample_rate"]
+        wav = audio["waveform"]
+        n = int(round(seconds * sr))
+        return ({"sample_rate": sr, "waveform": wav[..., n:]},)
+
+
+class H3MultishotSampler:
+    """The whole multishot pipeline in one node: parse script, loop shots,
+    chain each shot's last frame into the next shot's first_frame, seam-trim,
+    and return master frames + master audio. shot_count is REAL here: N shots
+    means N sampled shots, no wasted execution.
+
+    JoyEcho architecture applied to H3: multishot complexity lives inside the
+    node so the canvas stays legible."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "clip": ("CLIP",),
+            "video_vae": ("VAE",),
+            "audio_vae": ("VAE",),
+            "script": ("STRING", {
+                "multiline": True, "dynamicPrompts": False,
+                "default": "Shot 1 prompt goes here.\n---\n"
+                           "Shot 2 prompt goes here.\n---\n"
+                           "Shot 3 prompt goes here.",
+                "tooltip": "One prompt per shot, separated by --- on its own "
+                           "line. JSON {\"prompts\": [...]} also accepted."}),
+            "shot_count": ("INT", {
+                "default": 0, "min": 0, "max": 8,
+                "tooltip": "0 = one shot per script prompt. 1-8 forces the "
+                           "count: extra prompts drop, missing ones continue "
+                           "the last prompt. Every shot renders - this is "
+                           "the real thing here."}),
+            "width": ("INT", {"default": 768, "min": 32, "max": 4096,
+                              "step": 32}),
+            "height": ("INT", {"default": 1344, "min": 32, "max": 4096,
+                               "step": 32}),
+            "frames_per_shot": ("INT", {
+                "default": 243, "min": 5, "max": 481, "step": 17,
+                "tooltip": "Frames at 24fps on H3's 17k+5 grid (243 = ~10.1s;"
+                           " 362 = trained max ~15.1s; beyond is untested)."}),
+            "seed": ("INT", {"default": 0, "min": 0,
+                             "max": 0xffffffffffffffff,
+                             "control_after_generate": True}),
+            "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+            "seed_per_shot": ("BOOLEAN", {
+                "default": True, "label_on": "vary per shot",
+                "label_off": "same seed every shot",
+                "tooltip": "Leave ON. Measured: varying the seed per shot holds the "
+                           "face across the chain; using one seed for every shot "
+                           "made BOTH the face and the voice drift. Identity "
+                           "lives in the conditioning, not the seed."}),
+        },
+        "optional": {
+            "start_image": ("IMAGE", {
+                "tooltip": "Optional first frame (I2V). Shot 1 starts from this "
+                           "image; later shots continue chaining from the "
+                           "previous shot's last frame as usual. Leave "
+                           "unconnected for pure text-to-video."}),
+            "reference_images": ("IMAGE", {
+                "tooltip": "Optional SUBJECT/CHARACTER reference images (batch "
+                           "= multiple refs, e.g. via Batch Images), carried "
+                           "into EVERY shot as <Picture 1>, <Picture 2>, ... "
+                           "- distinct from start_image (which only seeds the "
+                           "I2V chain frame). Bind them in each shot's prompt: "
+                           "'She looks like the woman in <Picture 1>.' "
+                           "Verified on the ref2va checkpoint."}),
+            "voice_ref": ("AUDIO", {
+                "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
+                           "reference audio (<Audio 1>). Feed a clean solo "
+                           "line of the character - e.g. a slice of stage A's "
+                           "output - and the voice is PINNED across the chain "
+                           "instead of re-performed from text (verified: "
+                           "control drifted, voice-ref held). Bind it in each "
+                           "shot's prompt: 'Her voice is the voice in "
+                           "<Audio 1>.' Works with keyframe chaining via the "
+                           "refs+keyframes merge patch. NOTE: verified on the "
+                           "ref2va checkpoint; fl2va was not trained with "
+                           "reference rows, so wire the ref2va model when "
+                           "using this."}),
+            "sampler_name": (_sampler_names(), {
+                "default": "res_multistep",
+                "tooltip": "Sampling algorithm. res_multistep is the default "
+                           "and what every measurement in the docs used."}),
+            "scheduler": (_scheduler_names(), {
+                "default": "simple",
+                "tooltip": "Sigma schedule. simple is the default and what "
+                           "the docs measured."}),
+            # NEW WIDGETS GO LAST, ALWAYS: saved canvases map widgets_values
+            # by index, and a widget inserted mid-list silently shifts every
+            # value after it on the next load (the v1.4 lesson).
+            "sampler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a sampler NAME here (e.g. from H3 Studio "
+                           "Controls) to drive this widget from one master "
+                           "source. Overrides sampler_name when connected."}),
+            "scheduler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a scheduler NAME here to single-source it. "
+                           "Overrides scheduler when connected."}),
+            "self_anchor_voice": ("BOOLEAN", {
+                "default": False, "label_on": "anchor to shot 1's voice",
+                "label_off": "off",
+                "tooltip": "AUTOMATIC voice identity: after shot 1 renders, "
+                           "its own audio becomes the reference (<Audio 1>) "
+                           "for every later shot - the voice the model "
+                           "actually performed is pinned, no file needed. "
+                           "Write shot 1 so the character speaks a clean "
+                           "solo line. An external voice_ref, if connected, "
+                           "takes priority. Use with a ref2va checkpoint."}),
+            "output_scale": ("FLOAT", {
+                "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
+                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
+                           "This is a lanczos resize of the finished frames, "
+                           "not a second diffusion pass: it adds resolution, "
+                           "not detail. It is applied per shot, so peak memory "
+                           "is one shot rather than the whole chain, and it "
+                           "works with EVERY continuity mode including "
+                           "context_pin, because it happens after sampling. "
+                           "The memory bank still stores base-resolution "
+                           "clips, so conditioning and VRAM are unchanged."}),
+            "upscale_model": ("UPSCALE_MODEL", {
+                "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
+                           "(ESRGAN and friends) to synthesise detail instead "
+                           "of merely resizing. Applied per shot after decode, "
+                           "at the model's own factor; if output_scale is also "
+                           "set, the result is resized to land exactly there. "
+                           "Slower than output_scale and it invents texture - "
+                           "on a chain, judge it on the LAST shot, where any "
+                           "texture ratchet is worst."}),
+            "sigmas": ("SIGMAS", {
+                "tooltip": "Optional custom sigma schedule, replacing "
+                           "sampler/scheduler + steps entirely. Some turbo "
+                           "LoRAs ship a schedule they need in order to work "
+                           "at all. When this is connected the 'steps' and "
+                           "'scheduler' widgets are IGNORED - the step count "
+                           "becomes len(sigmas)-1 - and the console says so. "
+                           "The two-pass upscale split is taken as a fraction "
+                           "of the supplied schedule."}),
+            "save_every_shot": ("BOOLEAN", {
+                "default": False, "label_on": "write each shot as it decodes",
+                "label_off": "off",
+                "tooltip": "Write EVERY shot to output/video/H3_SHOTS/ the "
+                           "moment it decodes, in addition to the master. "
+                           "Insurance for long chains: everything that fails "
+                           "after the last shot - a mux OOM, a full disk, a "
+                           "cancelled tab - otherwise destroys the whole "
+                           "render at once. Shots are written BEFORE the seam "
+                           "trim, so consecutive files overlap by ~1s; the "
+                           "master is still the clean join. Costs one file "
+                           "write per shot."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "IMAGE", "AUDIO")
+    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered",
+                    "first_shot_frames", "first_shot_audio")
+    FUNCTION = "run"
+    CATEGORY = "sampling/minimax"
+
+    def run(self, model, clip, video_vae, audio_vae, script, shot_count,
+            width, height, frames_per_shot, seed, steps,
+            seed_per_shot=False, start_image=None, reference_images=None,
+            voice_ref=None, sampler_name="res_multistep", scheduler="simple",
+            sampler_override=None, scheduler_override=None,
+            self_anchor_voice=False, reference_image_size="match",
+            preview_first_shot=False, chain_gain_control="off",
+            save_every_shot=False, sigmas=None, output_scale=1.0,
+            upscale_model=None):
+        # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
+        # the raw latent between passes, and H3's latent is not a spatially
+        # smooth representation - interpolated values land off-manifold and
+        # pass 2, running at low sigma, has no room to pull them back. Three
+        # A/Bs at the previously documented recipe (14 steps, beta57) came
+        # back as colour-noise mush against clean single-pass controls, with
+        # shot 1 - which carries no pin at all - destroyed identically, so it
+        # was never about the chaining. Upscaling now happens AFTER decode
+        # (output_scale / upscale_model), where it cannot leave the manifold.
+        # The branches below are kept only so the diff stays readable; they
+        # are unreachable.
+        two_pass_upscale = False
+        upscale_factor, pass1_fraction, upscale_audio_denoise = 1.5, 0.4, 0.35
+        if sampler_override and str(sampler_override).strip():
+            sampler_name = str(sampler_override).strip()
+        if scheduler_override and str(scheduler_override).strip():
+            scheduler = str(scheduler_override).strip()
+        import torch
+        import node_helpers
+        from comfy_extras import nodes_custom_sampler as ncs
+        from comfy_extras import nodes_minimax_h3 as mmh3
+        from comfy_extras.nodes_audio import vae_decode_audio
+
+        # --- voice anchor: encode ONCE, ride in every shot's conditioning ---
+        voice_block = None
+        if voice_ref is not None:
+            wav = voice_ref["waveform"]
+            if wav.ndim == 2:
+                wav = wav.unsqueeze(0)
+            wav = wav[:1]
+            if wav.shape[1] == 1:              # mono crashes the packed layout
+                wav = wav.repeat(1, 2, 1)
+            elif wav.shape[1] > 2:
+                wav = wav[:, :2]
+            sr = int(voice_ref["sample_rate"])
+            vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+            if sr != vae_sr:
+                import torchaudio
+                wav = torchaudio.functional.resample(wav, sr, vae_sr)
+                sr = vae_sr
+            limit = 15 * sr                    # ref rows cost speed EVERY step
+            if wav.shape[-1] > limit:
+                wav = wav[..., :limit]
+            vz = audio_vae.encode(wav.movedim(1, -1))     # [1, 32, 2, T]
+            voice_block = {"kind": "audio", "ref_audio_t": vz.shape[-1],
+                           "audio_latent": vz}
+            print(f"[H3Multishot] voice anchor: {wav.shape[-1]/sr:.1f}s ref "
+                  f"audio rides in every shot as <Audio 1>.", flush=True)
+
+        # --- subject/character reference images (PR #10, @moonwhaler): encode
+        # ONCE, ride in every shot as fixed <Picture 1..N> slots - stable
+        # across the whole chain, same reasoning as the voice anchor. ---
+        import math
+        ref_image_items, ref_image_blocks = [], []
+        if reference_images is not None:
+            for i in range(reference_images.shape[0]):
+                img = reference_images[i:i + 1]
+                h, w = img.shape[1], img.shape[2]
+                if reference_image_size == "match":
+                    scale = min(1.0, math.sqrt((width * height) / (w * h)))
+                else:
+                    scale = min(1.0, mmh3.REF_IMAGE_SHORT_EDGE / min(w, h))
+                tw = max(mmh3.CANVAS_MULTIPLE,
+                         round(w * scale / mmh3.CANVAS_MULTIPLE) * mmh3.CANVAS_MULTIPLE)
+                th = max(mmh3.CANVAS_MULTIPLE,
+                         round(h * scale / mmh3.CANVAS_MULTIPLE) * mmh3.CANVAS_MULTIPLE)
+                resized = mmh3._resize(img, tw, th, "disabled")
+                z = video_vae.encode(resized)
+                ref_image_items.append({"type": "image", "data": resized})
+                ref_image_blocks.append({"kind": "image", "latent_h": th // 16,
+                                         "latent_w": tw // 16, "latent": z})
+            print(f"[H3Multishot] {len(ref_image_blocks)} reference image(s) "
+                  f"ride in every shot as <Picture 1..{len(ref_image_blocks)}>.",
+                  flush=True)
+
+        shots = _parse_script(script)
+        n = shot_count if shot_count > 0 else len(shots)
+        if len(shots) > n:
+            print(f"[H3Multishot] dropping {len(shots) - n} extra script "
+                  f"prompt(s) (shot_count={n}).", flush=True)
+            shots = shots[:n]
+        while len(shots) < n:
+            print(f"[H3Multishot] shot {len(shots) + 1} continues the last "
+                  f"prompt (script had fewer prompts than shot_count).",
+                  flush=True)
+            shots.append(shots[-1])
+
+        if sigmas is not None and len(sigmas) > 1:
+            # a supplied schedule wins: some turbo LoRAs only converge on the
+            # exact curve they shipped with, and silently re-deriving one from
+            # steps+scheduler would make them look broken rather than misused
+            steps = int(len(sigmas)) - 1
+            print("[%s] custom sigmas supplied (%d steps): the steps and "
+                  "scheduler widgets are ignored for this run."
+                  % ("H3Multishot", steps), flush=True)
+        else:
+            sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler,
+                                                     steps, 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
+
+        # --- two-pass upscale setup: low-res pass 1, exact full-res pass 2 ---
+        tr = w1 = h1 = sig_hi = sig_lo = lat_th = lat_tw = None
+        if two_pass_upscale:
+            tr = _load_upscaler_utils()
+            f = max(1.0, float(upscale_factor))
+            w1 = max(32, int(round(width / f / 32)) * 32)
+            h1 = max(32, int(round(height / f / 32)) * 32)
+            k = int(round(steps * float(pass1_fraction)))
+            k = max(1, min(steps - 1, k))
+            sig_hi, sig_lo = sigmas[:k + 1], sigmas[k:]
+            probe, _ = mmh3._empty_av_latent(width, height, frames_per_shot)
+            pv = probe["samples"]
+            pv = pv.unbind()[0] if getattr(pv, "is_nested", False) else pv
+            lat_th, lat_tw = int(pv.shape[-2]), int(pv.shape[-1])
+            del probe, pv
+            print(f"[H3Multishot] two-pass: {w1}x{h1} for {k} steps -> "
+                  f"latent x{width / w1:.2f} -> {width}x{height} for "
+                  f"{steps - k} steps (audio_denoise "
+                  f"{upscale_audio_denoise}).", flush=True)
+
+        frames_parts, audio_parts = [], []
+        sr = None
+        prev_last = None
+        # chain gain control state (see _cg_* helpers)
+        _cg_ref = None        # shot 1 tail texture level = the house level
+        _cg_anchor_lap = None # texture level of the anchor fed to THIS shot
+        _cg_gain = None       # measured per-hop gain (output head / anchor)
+        _cg_frozen = None     # frozen_anchor mode: shot 1 tail frame
+        _CG_WIN = 24          # frames per measurement window
+        if chain_gain_control != "off":
+            print(f"[H3Multishot] chain gain control: {chain_gain_control}",
+                  flush=True)
+        if start_image is not None:
+            # I2V: seed the chain so shot 1 uses the supplied frame as its
+            # keyframe, exactly the way later shots use the previous shot's
+            # last frame. No seam trim on shot 1 - that frame is wanted.
+            prev_last = start_image[:1]
+            print("[H3Multishot] I2V: shot 1 starts from the supplied image.",
+                  flush=True)
+        for si, prompt in enumerate(shots):
+            print(f"[H3Multishot] shot {si + 1}/{n} "
+                  f"({frames_per_shot}f @ {width}x{height})...", flush=True)
+            if two_pass_upscale:
+                latent, frame_count = mmh3._empty_av_latent(
+                    w1, h1, frames_per_shot)
+            else:
+                latent, frame_count = mmh3._empty_av_latent(
+                    width, height, frames_per_shot)
+            images, keyframes, keyframes_hi = [], [], []
+            if prev_last is not None:
+                anchor = prev_last[:1]
+                if (chain_gain_control == "frozen_anchor"
+                        and _cg_frozen is not None):
+                    anchor = _cg_frozen
+                    print("[H3Multishot] chain: anchoring on shot 1 tail "
+                          "(frozen).", flush=True)
+                elif chain_gain_control == "anchor_level" and _cg_ref:
+                    # the model returns ~gain x the anchor texture energy, so
+                    # feed it an anchor at ref/gain and the shot lands at ref
+                    # seed value only - replaced by the measured gain after
+                    # the first hop. 1.20 is what this stack actually returns
+                    # (measured 1.197 three hops running with a frozen anchor,
+                    # and 1.18 adaptively); the old 1.35 guess made shot 2
+                    # land ~6% under the house level before converging.
+                    g = _cg_gain if _cg_gain and _cg_gain > 1.0 else 1.20
+                    target = _cg_ref / g
+                    cur = _cg_lap_var(anchor)
+                    if cur > target * 1.02:
+                        sig = _cg_sigma_for(anchor, target)
+                        if sig > 0:
+                            anchor = _cg_gauss(anchor, sig)
+                            print(f"[H3Multishot] chain: anchor pre-compensated "
+                                  f"sigma {sig:.2f} ({cur:.5f} -> "
+                                  f"{_cg_lap_var(anchor):.5f}, target "
+                                  f"{target:.5f}, gain est {g:.2f})", flush=True)
+                _cg_anchor_lap = _cg_lap_var(anchor)
+                img = mmh3._resize(anchor, width, height, "disabled")
+                images.append(img)
+                if two_pass_upscale:
+                    # pass-1 cond wants the keyframe latent on the LOW grid;
+                    # pass-2 cond re-encodes the same frame at full res (true
+                    # detail, not an interpolated latent). Vision tokens use
+                    # the full-res image either way.
+                    img_lo = mmh3._resize(anchor, w1, h1, "disabled")
+                    keyframes.append({"resolved_frame_index": 0,
+                                      "image": img_lo})
+                    keyframes_hi.append({"resolved_frame_index": 0,
+                                         "image": img})
+                else:
+                    keyframes.append({"resolved_frame_index": 0, "image": img})
+            if voice_block is not None or ref_image_blocks:
+                # ref-items presentation, in fixed order: the subject/character
+                # refs keep their <Picture 1..N> slots, the chain frame takes
+                # the next <Picture> slot, the voice gets <Audio 1>. Payload-
+                # side the keyframe latent and the ref rows COMPOSE via the
+                # refs+keyframes merge patch (h3_avbank_probe) - without that
+                # patch comfy's refs branch would discard the keyframe latent.
+                items = list(ref_image_items)
+                items.extend({"type": "image", "data": im} for im in images)
+                if voice_block is not None:
+                    items.append({"type": "audio"})
+                tokens = clip.tokenize(prompt, minimax_ref_items=items)
+            else:
+                tokens = clip.tokenize(prompt, images=images)
+            cond_base = clip.encode_from_tokens_scheduled(tokens)
+            cond = cond_base
+            cond_hi = cond_base if two_pass_upscale else None
+            if keyframes:
+                for kf in keyframes:
+                    kf["latent"] = video_vae.encode(kf.pop("image"))
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_keyframes": keyframes,
+                    "minimax_frame_count": frame_count,
+                })
+            if keyframes_hi:
+                for kf in keyframes_hi:
+                    kf["latent"] = video_vae.encode(kf.pop("image"))
+                cond_hi = node_helpers.conditioning_set_values(cond_hi, {
+                    "minimax_keyframes": keyframes_hi,
+                    "minimax_frame_count": frame_count,
+                })
+            refs = list(ref_image_blocks)
+            if voice_block is not None:
+                refs.append(voice_block)
+            if refs:
+                # image blocks before audio blocks, matching the item order
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_refs": refs,
+                })
+                if cond_hi is not None:
+                    cond_hi = node_helpers.conditioning_set_values(cond_hi, {
+                        "minimax_refs": refs,
+                    })
+            # --- free the text encoder before the DiT loads -----------------
+            # The 32B VL encoder (~16.5GB even at Q4) and the H3 DiT (~25GB) do
+            # not co-fit on a 32GB card: without this the DiT loads PARTIALLY and
+            # streams ~19GB from system RAM every step (60min vs ~15min renders).
+            # Conditioning is already computed above, so the encoder weights are
+            # safe to evict here; they reload next shot (chained prompts need it).
+            # MULTI-GPU (issue #8, @VladiCz): when the TE lives on a DIFFERENT
+            # device than the DiT there is nothing to reclaim - evicting just
+            # forces a full TE reload every shot (measured: a third of the
+            # whole render). Skip the eviction entirely in that case.
+            import comfy.model_management as _mm
+            _te_dev = getattr(clip.patcher, "load_device", None)
+            _dit_dev = getattr(model, "load_device", None)
+            if (_te_dev is not None and _dit_dev is not None
+                    and str(_te_dev) != str(_dit_dev)):
+                if si == 0:
+                    print(f"[H3Multishot] TE on {_te_dev}, DiT on {_dit_dev} "
+                          f"- separate devices, TE stays resident (no "
+                          f"per-shot reload).", flush=True)
+            else:
+                try:
+                    clip.patcher.model.to(_mm.text_encoder_offload_device())
+                except Exception as _e:
+                    print(f"[H3Multishot] TE offload skipped: {_e}", flush=True)
+                try:
+                    _dev = _mm.get_torch_device()
+                    _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                    _mm.soft_empty_cache()
+                    _free = _mm.get_free_memory(_dev) / (1024 ** 3)
+                    print(f"[H3Multishot] TE evicted; {_free:.1f} GB free "
+                          f"for the DiT", flush=True)
+                except Exception as _e:
+                    print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
+            # ----------------------------------------------------------------
+            guider = ncs.BasicGuider().get_guider(model, cond)[0]
+            guider_hi = (ncs.BasicGuider().get_guider(model, cond_hi)[0]
+                         if two_pass_upscale else None)
+            shot_seed = (seed + si) if seed_per_shot else seed
+            noise = ncs.RandomNoise().get_noise(shot_seed)[0]
+            # payload signature: chained shots carry a keyframe; audio refs
+            # (voice_ref or self-anchor from shot 2 on) ride every step -
+            # same latent shape, materially bigger activation pool
+            _auto_set_payload(
+                "kf%da%d%s" % (
+                    1 if (si > 0 or start_image is not None) else 0,
+                    1 if (voice_ref is not None
+                          or (self_anchor_voice and si > 0)) else 0,
+                    "2p" if two_pass_upscale else ""))
+            _mb = _auto_measure_begin()
+            try:
+                if two_pass_upscale:
+                    out1, _d1 = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, sig_hi, latent)
+                    up = _upscale_av_exact(tr, out1, lat_th, lat_tw)
+                    s = max(0.0, min(1.0, float(upscale_audio_denoise)))
+                    members, was_nested = tr.extract_tensor(up["samples"])
+                    if was_nested and len(members) >= 2:
+                        if s <= 0.0:
+                            ridx, rstr = (0,), None
+                        elif s >= 1.0:
+                            ridx, rstr = (0, 1), None
+                        else:
+                            ridx, rstr = (0, 1), {0: 1.0, 1: s}
+                    else:
+                        ridx = rstr = None
+                    noise2 = ncs.RandomNoise().get_noise(shot_seed + 977)[0]
+                    up = tr.add_noise_nested_latent(
+                        model, noise2, sig_lo, up,
+                        renoise_indices=ridx, noise_strengths=rstr)
+                    up = tr.finalize_latent_for_handoff(up)
+                    out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                        ncs.DisableNoise().get_noise()[0], guider_hi,
+                        sampler, sig_lo, up)
+                else:
+                    out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, sigmas, latent)
+            finally:
+                # record even on interrupt/OOM: the peak up to that moment is
+                # a valid LOWER bound on the pool, and the cache only grows -
+                # an aborted thrashing run should still teach the next one
+                _auto_measure_end(_mb, model, steps=steps)
+
+            lat = out["samples"]
+            if getattr(lat, "is_nested", False):
+                lat = lat.unbind()[0]        # AV pair: [0]=video, [-1]=audio
+            imgs = video_vae.decode(lat)
+            if imgs.ndim == 5:
+                imgs = imgs.reshape(-1, imgs.shape[-3], imgs.shape[-2],
+                                    imgs.shape[-1])
+            aud = vae_decode_audio(audio_vae, out)
+            sr = aud["sample_rate"]
+            wav = aud["waveform"]
+
+            # --- chain gain control: measure this hop, then level it ---
+            if chain_gain_control != "off":
+                _w = min(_CG_WIN, imgs.shape[0])
+                head_lap = _cg_lap_var(imgs[:_w])
+                if si == 0:
+                    # shot 1 opens with an exposure fade-in (measured luma
+                    # 0.227 -> 0.468 over ~1.7s), so the house level comes
+                    # from the SETTLED tail, never the opening frames
+                    _cg_ref = _cg_lap_var(imgs[-_w:])
+                    _cg_frozen = imgs[-1:].clone()
+                    print(f"[H3Multishot] chain: house texture level "
+                          f"{_cg_ref:.5f} (shot 1 tail)", flush=True)
+                    if chain_gain_control == "flatten":
+                        # level shot 1 too, but only its post-fade portion:
+                        # frames under the target are left alone by _cg_flatten
+                        imgs, _s = _cg_flatten(imgs, _cg_ref)
+                        if _s > 0:
+                            print(f"[H3Multishot] chain: shot 1 levelled "
+                                  f"(mean sigma {_s:.2f})", flush=True)
+                        _cg_frozen = imgs[-1:].clone()
+                else:
+                    if _cg_anchor_lap:
+                        hop = head_lap / max(_cg_anchor_lap, 1e-9)
+                        _cg_gain = hop if _cg_gain is None else (
+                            0.5 * _cg_gain + 0.5 * hop)
+                        print(f"[H3Multishot] chain: shot {si + 1} hop gain "
+                              f"{hop:.3f} (head {head_lap:.5f} / anchor "
+                              f"{_cg_anchor_lap:.5f}); vs house "
+                              f"{head_lap / max(_cg_ref, 1e-9) - 1.0:+.1%}",
+                              flush=True)
+                    if chain_gain_control == "flatten" and _cg_ref:
+                        imgs, _s = _cg_flatten(imgs, _cg_ref)
+                        if _s > 0:
+                            print(f"[H3Multishot] chain: shot levelled to "
+                                  f"house (mean sigma {_s:.2f}; head "
+                                  f"{_cg_lap_var(imgs[:_w]):.5f} tail "
+                                  f"{_cg_lap_var(imgs[-_w:]):.5f} vs house "
+                                  f"{_cg_ref:.5f})", flush=True)
+                    if chain_gain_control == "match_output" and _cg_ref:
+                        if head_lap > _cg_ref * 1.05:
+                            sig = _cg_sigma_for(imgs[:_w], _cg_ref)
+                            if sig > 0:
+                                imgs = _cg_gauss(imgs, sig)
+                                print(f"[H3Multishot] chain: shot matched to "
+                                      f"house level, sigma {sig:.2f} (head "
+                                      f"{head_lap:.5f} -> "
+                                      f"{_cg_lap_var(imgs[:_w]):.5f})",
+                                      flush=True)
+
+            prev_last = imgs[-1:].clone()
+            if si == 0 and self_anchor_voice and voice_block is None:
+                # THE self-anchor: shot 1's own rendered voice becomes the
+                # reference for every later shot. The decoded audio is
+                # already at the VAE's rate and stereo, so no guard needed -
+                # just trim (ref rows cost speed every step) and encode.
+                aw = wav[:1] if wav.ndim == 3 else wav.unsqueeze(0)[:1]
+                limit = 15 * sr
+                if aw.shape[-1] > limit:
+                    aw = aw[..., :limit]
+                vz = audio_vae.encode(aw.movedim(1, -1))
+                voice_block = {"kind": "audio", "ref_audio_t": vz.shape[-1],
+                               "audio_latent": vz}
+                print(f"[H3Multishot] self-anchor: shot 1's voice "
+                      f"({aw.shape[-1]/sr:.1f}s) is now <Audio 1> for the "
+                      f"remaining {n - 1} shot(s).", flush=True)
+            if si == 0:
+                first_frames = imgs.detach().cpu()
+                _fw = wav if wav.ndim == 3 else wav.unsqueeze(0)
+                first_audio = {"waveform": _fw.detach().cpu(),
+                               "sample_rate": sr}
+                if preview_first_shot:
+                    # write shot 1 NOW - minutes before the chain finishes -
+                    # so a bad take can be cancelled instead of waited out
+                    _write_shot_mp4(imgs, wav, sr,
+                                    "video/H3_FIRSTSHOT/firstshot",
+                                    "FIRST-SHOT PREVIEW saved", "H3Multishot")
+            if save_every_shot:
+                # before the seam trim: this file is the shot as rendered, so
+                # a chain that dies at the mux can still be joined by hand
+                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
+                                f"shot {si + 1}/{n} saved", "H3Multishot")
+            if si > 0:
+                imgs = imgs[1:]                       # duplicated seam frame
+                trim = int(round(sr / 24.0))          # matching 1/24s audio
+                wav = _smart_head_trim(wav, sr, trim)
+            frames_parts.append(imgs.cpu())
+            audio_parts.append(wav.cpu())
+
+        master = torch.cat(frames_parts, dim=0)
+        waveform = _xfade_audio(audio_parts, sr)
+        print(f"[H3Multishot] done: {n} shots, {master.shape[0]} frames "
+              f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
+        return (master, {"waveform": waveform, "sample_rate": sr}, n,
+                first_frames, first_audio)
+
+
+
+
+
+
+# ---------------------------------------------------------------------------
+# Colour levelling (seamless chains)
+#
+# MVGD colour-statistics transfer to a FIXED house reference (shot 1's settled
+# tail). Chained matching (each shot to its predecessor) re-accumulates drift;
+# a fixed reference cannot. Stats are computed in linearised RGB (x**2.2), the
+# transform is applied per 8-frame block with EMA smoothing so the correction
+# cannot pump frame to frame.
+# ---------------------------------------------------------------------------
+
+def _cc_stats(imgs):
+    """(mu[3], cov[3,3]) of an IMAGE batch [B,H,W,C] in linear RGB."""
+    import torch
+    x = imgs.reshape(-1, imgs.shape[-1]).clamp(0, 1) ** 2.2
+    # MEDIAN, not mean: the matching statistic must track scene LIGHTING,
+    # not the subject. A close-up puts a big lit face where a wide had
+    # room, so the mean moves for compositional reasons and mean-matching
+    # then "corrects" a change that was never an exposure error
+    # (measured: face region +36% between a wide and a close-up while the
+    # wall strip held within 2%). The median is dominated by the bulk of
+    # the scene and barely moves under reframing.
+    mu = x.median(dim=0).values if x.shape[0] > 1 else x.mean(dim=0)
+    d = x - mu
+    cov = (d.T @ d) / max(x.shape[0] - 1, 1)
+    return mu, cov
+
+
+def _cc_sqrtm(m):
+    """Symmetric PSD matrix square root via eigendecomposition."""
+    import torch
+    vals, vecs = torch.linalg.eigh(m.double())
+    vals = vals.clamp_min(1e-12)
+    return (vecs @ torch.diag(vals.sqrt()) @ vecs.T)
+
+
+def _cc_mvgd_T(cov_src, cov_dst):
+    """MVGD transfer matrix: src distribution -> dst distribution."""
+    import torch
+    s_half = _cc_sqrtm(cov_src.double())
+    s_ihalf = torch.linalg.inv(s_half)
+    inner = _cc_sqrtm(s_half @ cov_dst.double() @ s_half)
+    return (s_ihalf @ inner @ s_ihalf)
+
+
+def _cc_apply_perframe(imgs, target_mu, strength=1.0, smooth=13):
+    """Level EVERY FRAME to one fixed colour target.
+
+    A per-shot gain only works if the shot is internally uniform. Under the
+    FFLF chain it is not: a shot can render with a warm head and a cooler
+    body, and matching medians then multiplies the whole shot by one gain -
+    amplifying the head (measured: shot 3 median pulled 2.29 -> 3.11, which
+    threw its opening frames to 4.60 and produced a 40% step at the join).
+
+    Correcting each frame independently removes both the between-shot offset
+    and the within-shot drift. The gain is smoothed over ~0.5s so a real
+    lighting event still reads as an event instead of being tracked away.
+    """
+    import torch
+    if strength <= 0:
+        return imgs
+    n = imgs.shape[0]
+    lin = imgs.clamp(0, 1).double() ** 2.2
+    per = lin.reshape(n, -1, imgs.shape[-1]).median(dim=1).values
+    gain = (target_mu.double().view(1, 3)
+            / per.clamp_min(1e-6)).clamp(0.7, 1.4)
+    if not bool(torch.isfinite(gain).all()):
+        return imgs
+    k = int(smooth) | 1
+    if n > k > 1:
+        g = torch.nn.functional.pad(gain.T.unsqueeze(0), (k // 2, k // 2),
+                                    mode="replicate")
+        gain = torch.nn.functional.avg_pool1d(g, k, stride=1).squeeze(0).T[:n]
+    out = imgs.clone()
+    for i in range(0, n, 8):
+        seg = imgs[i:i + 8]
+        gs = gain[i:i + 8].view(-1, 1, 1, imgs.shape[-1])
+        m = (((seg.clamp(0, 1).double() ** 2.2) * gs).clamp(0, 1)
+             ** (1 / 2.2)).to(seg.dtype)
+        out[i:i + 8] = seg + strength * (m - seg)
+    return out
+
+
+def _cc_apply(imgs, house_mu, house_cov, strength=1.0, block=8):
+    """Level an IMAGE batch to the house colour statistics.
+
+    ONE GLOBAL correction for the whole shot - stats pooled over every frame,
+    never per-block. A per-block transfer forces each 8-frame block onto the
+    full house distribution, which destroys legitimate local variation
+    (render-verified failure: a deep-shadow block got remapped to mid-grey
+    and the whole shot posterised into magenta/green).
+
+    The correction is a per-channel GAIN in linear light, not an affine
+    transfer: exposure and tint drift between chained shots is multiplicative
+    (a gain), and an additive offset in linear space lifts black levels by
+    the full drift amount - a 0.02-linear offset turns true black into ~0.17
+    gamma, ruinous in dark scenes. Gains map black to exactly black, are
+    monotone per channel (posterisation impossible), and correct the axis
+    that actually drifts at joins (luma/tint). Covariance matching is
+    deliberately dropped; `house_cov` and `block` are kept for signature
+    compatibility (`block` only sets the application chunk size).
+
+    Guard rail: gains are clamped to [0.7, 1.4] - a correction beyond that
+    means the shot genuinely changed (a light went out, a door opened) and
+    colour transfer must not fight real scene changes.
+    Measured: colour is CONSTANT within a shot (flat to three decimals
+    across a whole shot) and steps hard at the boundary. So one gain per
+    shot is the right shape of correction - what was wrong before was the
+    TARGET (a rolling per-shot house). Drive every shot to one scene-wide
+    reference instead: see color_level="scene".
+    """
+    import torch
+    if strength <= 0:
+        return imgs
+    mu_s, _cov_s = _cc_stats(imgs)
+    gain = (house_mu.double() / mu_s.double().clamp_min(1e-6)).clamp(0.7, 1.4)
+    if not bool(torch.isfinite(gain).all()):
+        return imgs
+    out = imgs.clone()
+    for i in range(0, imgs.shape[0], max(1, int(block))):
+        seg = imgs[i:i + block]
+        lin = seg.clamp(0, 1).double() ** 2.2
+        matched = ((lin * gain).clamp(0, 1) ** (1 / 2.2)).to(seg.dtype)
+        out[i:i + block] = seg + strength * (matched - seg)
+    return out
+
+
+def _subject_defs(n_image, n_audio, n_video, speaker="the person"):
+    """Official H3 ref2va subject_definitions + retention_analysis block.
+
+    The tokenizer emits reference items as bare "<Picture k>: ",
+    "<Audio j>: " and "<Video k>: " labels BEFORE the prompt text
+    (comfy/text_encoders/minimax.py). Without a subject_definitions section
+    the model gets labelled references and is never told what they are or
+    what to keep - which is why identity, room, colour and especially VOICE
+    drift between chained shots. Syntax follows the MiniMax-H3 model card's
+    Ref2VA case; retention keywords are fully_preserved / partially_copy /
+    reference.
+    """
+    import os as _os
+    if _os.environ.get("H3_NO_SUBJECT_DEFS"):   # A/B switch for testing
+        return ""
+    if not (n_image or n_audio or n_video):
+        return ""
+    d = ["subject_definitions:",
+         "<Subject 1> is %s speaking in this scene." % speaker]
+    r = ["retention_analysis:",
+         "<Subject 1> (appears in [Shot 1]): fully_preserved - <Subject 1> "
+         "retains the same face, skin, hair, glasses and wardrobe, and "
+         "stays in the same room under the same lighting and colour "
+         "temperature."]
+    for k in range(1, n_image + 1):
+        d.append("<Picture %d> is a reference photograph of <Subject 1>." % k)
+    for k in range(1, n_video + 1):
+        d.append("<Video %d> is a clip from an earlier moment of this same "
+                 "continuous scene, showing <Subject 1> in the same place "
+                 "under the same light." % k)
+        r.append("<Video %d>: reference - the target video keeps the "
+                 "framing, camera distance, room contents and colour "
+                 "temperature of <Video %d>." % (k, k))
+    for j in range(1, n_audio + 1):
+        d.append("<Audio %d> is the synchronized audio track of <Video %d>, "
+                 "containing <Subject 1>'s speaking voice." % (j, j))
+        r.append("<Audio %d>: reference - the target audio references the "
+                 "voice timbre in <Audio %d> so <Subject 1> speaks with the "
+                 "same voice." % (j, j))
+    return "\n".join(d) + "\n" + "\n".join(r)
+
+
+def _vhs_glitch_frames(frames, seed, strength=1.0):
+    """Diegetic VHS tracking glitch over a short frame run (join masking).
+
+    Horizontal displacement bands, a slight chroma shift, dropout flecks and
+    a noise veil, peaking mid-run and fading at both ends so the artifact
+    reads as one tape hiccup rather than a processed boundary. Deterministic
+    per seed. frames [N,H,W,C] in 0..1; returns a new tensor.
+    """
+    import torch
+    g = torch.Generator().manual_seed(seed)
+    out = frames.clone()
+    N, H, W, _C = out.shape
+    for i in range(N):
+        amp = strength * (1.0 - abs(i - (N - 1) / 2.0) / ((N + 1) / 2.0))
+        if amp <= 0:
+            continue
+        for _b in range(2 + int(torch.randint(0, 3, (1,), generator=g))):
+            y0 = int(torch.randint(0, max(1, H - 24), (1,), generator=g))
+            bh = int(torch.randint(4, 24, (1,), generator=g))
+            dx = int(int(torch.randint(-40, 41, (1,), generator=g)) * amp)
+            if dx:
+                out[i, y0:y0 + bh] = torch.roll(out[i, y0:y0 + bh],
+                                                shifts=dx, dims=1)
+        dxc = int(6 * amp)
+        if dxc:
+            out[i, ..., 0] = torch.roll(out[i, ..., 0], dxc, dims=1)
+        for _l in range(int(6 * amp)):
+            y = int(torch.randint(0, H - 2, (1,), generator=g))
+            x0 = int(torch.randint(0, W // 2, (1,), generator=g))
+            ln = int(torch.randint(20, W // 2, (1,), generator=g))
+            hot = float(torch.rand(1, generator=g)) > 0.5
+            out[i, y:y + 2, x0:x0 + ln] = 0.9 if hot else 0.05
+        out[i] = (out[i] + amp * 0.06 * torch.randn(
+            out[i].shape, generator=g).to(out.device, out.dtype)).clamp(0, 1)
+    return out
+
+
+def _vhs_glitch_audio(wav, sr, at_start, seed, ms=90):
+    """Tape head-switch audio hiccup: duck the signal and lay hiss over ~ms
+    at the head (at_start=True) or tail of the waveform. Deterministic."""
+    import torch
+    g = torch.Generator().manual_seed(seed)
+    n = min(int(sr * ms / 1000.0), wav.shape[-1])
+    if n < 8:
+        return wav
+    out = wav.clone()
+    seg = out[..., :n] if at_start else out[..., -n:]
+    t = torch.linspace(0, 1, n)
+    env = torch.sin(t * 3.14159265)          # fade the hiccup in and out
+    hiss = 0.05 * torch.randn(seg.shape, generator=g).to(seg.device,
+                                                         seg.dtype)
+    seg = seg * (1.0 - 0.6 * env) + hiss * env
+    if at_start:
+        out[..., :n] = seg
+    else:
+        out[..., -n:] = seg
+    return out
+
+
+def _aud_env(x, win):
+    """Mono 20ms-window RMS envelope of a waveform tensor [..., T]."""
+    import torch
+    x = x.reshape(-1, x.shape[-1]).float().mean(dim=0)
+    m = (x.shape[-1] // win) * win
+    if m < win:
+        return torch.zeros(1)
+    return x[:m].reshape(-1, win).pow(2).mean(dim=-1).sqrt()
+
+
+def _jb_grid(n):
+    """Largest valid H3 clip length <= n: frames must satisfy n % 17 == 5."""
+    n = int(n)
+    if n < 5:
+        return 5
+    while n % 17 != 5 and n > 5:
+        n -= 1
+    return max(5, n)
+
+
+def _jb_centre_clip(imgs, want):
+    """Centre clip of `want` frames (snapped to the 17k+5 grid).
+
+    JoyEcho selects its slot around the CENTRE of the shot
+    (_select_video_clip_around_frame, default mode "center"), not the tail.
+    Returns (clip, start_index) so the audio window can be cut to match.
+    """
+    total = int(imgs.shape[0])
+    n = _jb_grid(min(int(want), total))
+    start = max(0, (total - n) // 2)
+    return imgs[start:start + n], start
+
+
+def _jb_audio_window(wav, sr, start_frame, num_frames, fps=24.0):
+    """The audio under a clip's frame range, as an AUDIO dict."""
+    import torch
+    a = wav if wav.ndim == 3 else wav.unsqueeze(0)
+    s = int(round(start_frame / fps * sr))
+    e = int(round((start_frame + num_frames) / fps * sr))
+    s = max(0, min(s, a.shape[-1]))
+    e = max(s + 1, min(e, a.shape[-1]))
+    return {"waveform": a[..., s:e].clone(), "sample_rate": int(sr)}
+
+
+class _H3ChainBank:
+    """Bounded frame bank: pinned earliest entries + recency tail.
+
+    Mirrors the JoyEcho/LTX bank policy that keeps long chains from drifting:
+    `frames()` always returns the first `num_fix` entries ever added, plus the
+    most recent entries, capped at `max_size` total. Conditioning on a set that
+    always contains the beginning of the episode is what breaks the
+    shot-to-shot feedback path - each shot is no longer a pure function of the
+    one before it.
+    """
+
+    def __init__(self, num_fix=1, max_size=3):
+        self.num_fix = max(0, int(num_fix))
+        self.max_size = max(1, int(max_size))
+        self._entries = []
+
+    def add(self, frame):
+        self._entries.append(frame)
+        # prune to what frames() can ever return, so a long chain does not
+        # hold every decoded frame in memory for nothing
+        keep_fixed = min(self.num_fix, self.max_size)
+        keep_tail = self.max_size - keep_fixed
+        if len(self._entries) > keep_fixed + keep_tail:
+            head = self._entries[:keep_fixed]
+            # keep_tail == 0 must yield NO tail: entries[len-0:] is the whole
+            # list (the slice bug that unbounded JoyEcho's bank)
+            tail = self._entries[-keep_tail:] if keep_tail > 0 else []
+            self._entries = head + tail
+
+    def frames(self):
+        fixed = self._entries[:min(self.num_fix, self.max_size)]
+        tail = self._entries[len(fixed):]
+        keep = self.max_size - len(fixed)
+        if keep <= 0:
+            return list(fixed)
+        # keep_tail == 0 must yield NO tail entries: tail[-0:] is the WHOLE
+        # list, which is exactly the bug that let JoyEcho's bank grow unbounded
+        return list(fixed) + (list(tail[-keep:]) if keep > 0 else [])
+
+    def latest(self):
+        return self._entries[-1] if self._entries else None
+
+    def describe(self):
+        f = min(self.num_fix, self.max_size, len(self._entries))
+        return f"{len(self.frames())} slot(s) [{f} pinned + {len(self.frames()) - f} recent]"
+
+
+class H3MultishotMemorySampler:
+    """Multishot with a MEMORY BANK - a structural port of JoyEcho multishot.
+
+    There is no keyframe here. Shots are not continued pixel-wise from their
+    predecessor; each is generated fresh and held together by a bank of past
+    shots injected as reference conditioning. That is JoyEcho's architecture,
+    and it is why JoyEcho chains do not accumulate texture drift: a shot is
+    never a pure function of the shot before it, because the bank always
+    contains the beginning of the episode.
+
+    Bank slot = a short video clip from the MIDDLE of a shot + the audio under
+    it, injected as an H3 `video_audio` reference. The first `bank_pinned`
+    slots are never evicted; the rest is a bounded recency window.
+
+    REQUIRES a ref2va checkpoint - reference rows are what this node is built
+    on, and fl2va was not trained with them.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "clip": ("CLIP",),
+            "video_vae": ("VAE",),
+            "audio_vae": ("VAE",),
+            "script": ("STRING", {"multiline": True, "default": "",
+                                  "tooltip": "One prompt per shot: JSON "
+                                             "{\"prompts\": [...]} or plain "
+                                             "blocks separated by --- lines."}),
+            "shot_count": ("INT", {"default": 0, "min": 0, "max": 64,
+                                   "tooltip": "0 = one shot per script prompt."}),
+            "width": ("INT", {"default": 768, "min": 32, "max": 4096, "step": 32}),
+            "height": ("INT", {"default": 1344, "min": 32, "max": 4096, "step": 32}),
+            "frames_per_shot": ("INT", {"default": 243, "min": 5, "max": 1450,
+                                        "step": 17,
+                                        "tooltip": "Trained range is ~124-362;"
+                                        " longer single shots are ladder "
+                                        "territory (RoPE extrapolation) - "
+                                        "the audio-spine pass runs 719f "
+                                        "low-res through exactly this."}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff,
+                             "control_after_generate": True}),
+            "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+            "seed_per_shot": ("BOOLEAN", {"default": True,
+                                          "label_on": "vary per shot",
+                                          "label_off": "same seed every shot"}),
+            "memory_frames": ("INT", {
+                "default": 2, "min": 0, "max": 3,
+                "tooltip": "RECENCY slots: how many of the most recent shots "
+                           "stay in the bank. Total bank = pinned + recent, "
+                           "capped at 3 by H3's reference limit."}),
+            "anchor_frames": ("INT", {
+                "default": 1, "min": 0, "max": 9,
+                "tooltip": "Identity reference images taken from start_image, "
+                           "used on EVERY shot (JoyEcho seeds identity on shot "
+                           "1 and lets the bank carry it after that; keep this "
+                           "at 0 or 1)."}),
+        }, "optional": {
+            "start_image": ("IMAGE", {
+                "tooltip": "Optional identity reference image. NOT a first "
+                           "frame - this node has no keyframe."}),
+            "keyframe_images": ("IMAGE", {
+                "tooltip": "flf_chain only: N+1 boundary stills for N shots, "
+                           "in order. Shot i is generated between image i "
+                           "and image i+1. Best source is a single long "
+                           "low-res take of the whole scene - its frames at "
+                           "the boundary times are already colour-matched, "
+                           "identity-matched and correctly posed, so every "
+                           "join inherits one consistent look."}),
+            "guide_audio": ("AUDIO", {
+                "tooltip": "AUDIO SPINE: a continuous audio track for the "
+                           "WHOLE take - a voice recording, a song, or a "
+                           "low-res long pass. Each shot's audio stream is "
+                           "locked to its time-slice of this track at every "
+                           "sampling step; the video follows the locked "
+                           "audio (lips included) via the model's own "
+                           "audio-video attention. Works with EVERY "
+                           "continuity mode - the per-shot stride accounts "
+                           "for each mode's seam trim (render-verified on "
+                           "context_pin). Any sample rate: the track is "
+                           "resampled to the audio VAE's rate and mono is "
+                           "upmixed. This is the locked-audio music-video "
+                           "path."}),
+            "sampler_name": (_sampler_names(), {"default": "res_multistep"}),
+            "scheduler": (_scheduler_names(), {"default": "simple"}),
+            "bank_pinned": ("INT", {
+                "default": 1, "min": 0, "max": 3,
+                "tooltip": "How many of the EARLIEST shots stay in the bank "
+                           "permanently. This is the anti-drift lever: with "
+                           "shot 1 pinned, later shots always see where the "
+                           "episode started. 0 = pure recency."}),
+            "chain_gain_control": (["off", "flatten", "match_output"], {
+                "default": "off",
+                "tooltip": "Optional post-hoc texture levelling. Leave off "
+                           "unless measuring - the bank is the structural fix."}),
+            "continuity": (["cut", "seamless", "seamless_tail",
+                            "latent_handoff", "first_frame", "flf_chain",
+                            "context_pin"], {
+                "default": "cut",
+                "tooltip": "cut = JoyEcho-pure: no keyframe, every shot is a "
+                           "fresh take held together by the bank. Framing and "
+                           "exposure step between shots - correct for "
+                           "multishot storytelling with cuts.\n"
+                           "seamless = LEGACY, kept for comparison: hands "
+                           "the next shot its predecessor's last frame as a "
+                           "latent-only keyframe. That is a SOFT hint - no "
+                           "vision tokens - and the model often satisfies it "
+                           "loosely, so the join can still read as a cut. "
+                           "For a real join use context_pin or "
+                           "first_frame.\n"
+                           "seamless_tail = LEGACY, kept for comparison: "
+                           "pins the previous shot's frames -9/-5/-1 at "
+                           "keyframe indices 0/4/8 so velocity carries too. "
+                           "Needs interior keyframe anchors, which CONFLICT "
+                           "with the Motion-Context pack - with that pack "
+                           "installed this mode stops with an error naming "
+                           "the alternatives instead of crashing mid-chain.\n"
+                           "latent_handoff = one denoise trajectory: the next "
+                           "shot's first latent block (video AND audio) is "
+                           "hard-locked to the previous shot's actual tail "
+                           "latents at every sampling step, released only for "
+                           "the final detail steps. Speech continues mid-word "
+                           "because the model wakes up inside its own "
+                           "previous state - no keyframes involved.\n"
+                           "first_frame = the model's OWN continuation "
+                           "mechanism (fl2va task): the previous shot's "
+                           "last frame is handed over the way the stock "
+                           "Image-to-Video node does it - as VISION TOKENS "
+                           "through the text encoder AND as the frame-0 "
+                           "keyframe latent. The new shot literally starts "
+                           "on that frame; only the duplicate is trimmed. "
+                           "USE AN fl2va CHECKPOINT (ref2va is trained for "
+                           "reference rows, not first-frame hand-off) - and "
+                           "note the bank is disabled here, because fl2va "
+                           "has no reference rows.\n"
+                           "flf_chain = TRUE FFLF. Supply N+1 boundary "
+                           "keyframes for N shots; shot i renders BETWEEN "
+                           "keyframe i and keyframe i+1. Shot i ends on "
+                           "exactly the image shot i+1 begins on, so the "
+                           "join is one shared picture rather than two "
+                           "independent guesses - colour, framing and pose "
+                           "match by construction.\n"
+                           "context_pin = Motion-Context chaining (needs the "
+                           "ComfyUI-H3-Motion-Context pack): the previous "
+                           "shot's last 22 frames are pinned into the next "
+                           "shot's head AS RAW LATENTS at interior keyframe "
+                           "coordinates - bit-identical content, no VAE "
+                           "round trip, so velocity AND colour carry - plus "
+                           "a timeline-placed audio ref. The regenerated "
+                           "head is trimmed on decode. Composes with the "
+                           "bank, colour levels and join fx."}),
+            "bank_clip_frames": ("INT", {
+                "default": 22, "min": 5, "max": 124, "step": 17,
+                "tooltip": "Frames per bank slot, taken from the middle of "
+                           "each shot (JoyEcho stores a clip, not a single "
+                           "frame). Reference rows cost time on every sampling "
+                           "step, so keep this small: 22 is ~0.9s."}),
+            "color_level": (["off", "mvgd", "scene"], {
+                "default": "off",
+                "tooltip": "Level every shot's colour/exposure statistics to "
+                           "shot 1's settled tail (FIXED reference - chained "
+                           "matching re-accumulates drift). Runs BEFORE the "
+                           "join anchor and bank are taken from the shot, so "
+                           "the next shot inherits corrected statistics. "
+                           "Kills the exposure step at joins deterministically."}),
+            "join_anchor_noise": ("FLOAT", {
+                "default": 0.0, "min": 0.0, "max": 0.05, "step": 0.005,
+                "tooltip": "Mix this much seeded noise into every join "
+                           "keyframe latent (SkyReels noised-clean-condition). "
+                           "The texture ratchet exists because the model "
+                           "treats its own output as pristine and adds ~1.2x "
+                           "detail on top; a little noise closes that gap at "
+                           "the source. 0.02 is the researched setting. The "
+                           "noised frames never reach the final cut."}),
+            "join_blend": ("BOOLEAN", {
+                "default": False, "label_on": "crossfade overlap",
+                "label_off": "hard drop",
+                "tooltip": "seamless_tail only: instead of hard-dropping the "
+                           "9 regenerated overlap frames, crossfade them "
+                           "against the previous tail (with a grain guard so "
+                           "the blend band does not read as a grain dip) and "
+                           "fade audio over the same 375ms. Any residual step "
+                           "is spread across 9 frames instead of landing on "
+                           "one boundary."}),
+            "handoff_release": ("FLOAT", {
+                "default": 0.30, "min": 0.0, "max": 1.0, "step": 0.05,
+                "tooltip": "latent_handoff only: sigma below which the locked "
+                           "overlap is released so the detail steps can "
+                           "reconcile it with the new content. Higher = freer "
+                           "(released earlier), 0 = locked to the very end."}),
+            "bank_ref_noise": ("FLOAT", {
+                "default": 0.0, "min": 0.0, "max": 0.05, "step": 0.005,
+                "tooltip": "Mix this much seeded noise into every bank clip "
+                           "before it is stored (SkyReels noised-clean-"
+                           "condition, same idea as join_anchor_noise but for "
+                           "the references). The texture ratchet rides bank "
+                           "clips: the model copies its own output and adds "
+                           "~1.2x detail, worst on faces/skin. 0.02 is the "
+                           "keyframe-researched setting."}),
+            "end_anchor": ("BOOLEAN", {
+                "default": False, "label_on": "return to house framing",
+                "label_off": "off",
+                "tooltip": "Pin shot 1's FIRST frame as a keyframe at the "
+                           "LAST frame of every later shot. H3 push-in creep "
+                           "compounds across chained shots (each shot "
+                           "inherits the previous crept tail and pushes "
+                           "further), so tails drift ever further from the "
+                           "prompted framing and every join mechanism "
+                           "inherits an off-spec tail. The end pin closes "
+                           "the loop: a shot may breathe inward mid-take but "
+                           "must settle back to house framing by its tail, "
+                           "so the next join starts from framing the text "
+                           "agrees with."}),
+            "join_fx": (["off", "vhs_glitch"], {
+                "default": "off",
+                "tooltip": "Diegetic join masking: dress every join in a "
+                           "short VHS tracking hiccup (displacement bands, "
+                           "chroma shift, dropout flecks, audio head-switch "
+                           "duck+hiss) peaking on the boundary. For analog-"
+                           "horror content the cut stops being an artifact "
+                           "to hide and becomes part of the tape. Works with "
+                           "every continuity mode."}),
+            "audio_lock": ("BOOLEAN", {
+                "default": True, "label_on": "locked (replay/spine)",
+                "label_off": "free (silent-join)",
+                "tooltip": "latent_handoff only. ON: the audio head is a "
+                           "locked replay of the previous tail (or the "
+                           "spine). OFF = the SILENT-JOIN policy: script "
+                           "each shot to land its line and hold still for "
+                           "the last beat; audio generates freely, the new "
+                           "head's audio is kept in full and the previous "
+                           "tail's audio is trimmed instead. Nothing the "
+                           "model generates is discarded, so no word can "
+                           "be lost BY CONSTRUCTION. A connected "
+                           "guide_audio spine overrides this to locked."}),
+            "handoff_taper": ("INT", {
+                "default": 0, "min": 0, "max": 10,
+                "tooltip": "latent_handoff only. Rows AFTER the hard lock "
+                           "that are softly biased toward a continuation of "
+                           "the previous motion, at linearly decaying "
+                           "strength. Without it the lock ends at a cliff: "
+                           "the replayed frames are faithful, then the next "
+                           "frame follows the shot's OWN pose plan - "
+                           "measured as a 3x larger discontinuity on the "
+                           "person than on the static room. The taper gives "
+                           "the pose a ramp to follow. 3-5 is a good start "
+                           "(each row = 4 frames)."}),
+            "handoff_depth": (["block", "bootstrap"], {
+                "default": "block",
+                "tooltip": "latent_handoff overlap depth. block = lock the "
+                           "first full 17-frame block (strong video anchor, "
+                           "22 frames trimmed, ~0.92s join gap). bootstrap "
+                           "= lock only the 2 bootstrap rows to the "
+                           "previous last 5 frames (5 frames trimmed, "
+                           "~0.21s gap - an ordinary breath), with a "
+                           "frame-0 keyframe pin of the previous last "
+                           "frame; end_anchor + the bank carry the rest."}),
+            # NEW WIDGETS GO LAST, ALWAYS: saved canvases map widgets_values
+            # by index, and a widget inserted mid-list silently shifts every
+            # value after it on the next load (the v1.4 lesson). Sockets
+            # (IMAGE/AUDIO/forceInput STRING) take no widget slot, so their
+            # position here is free.
+            "reference_images": ("IMAGE", {
+                "tooltip": "Optional SUBJECT/CHARACTER reference images (batch "
+                           "= multiple refs, e.g. via Batch Images), carried "
+                           "into EVERY shot as <Picture 1>, <Picture 2>, ... "
+                           "ahead of the bank slots, so their numbering never "
+                           "shifts as the bank fills. Distinct from "
+                           "start_image, which seeds identity for shot 1 only. "
+                           "Bind them in each shot's prompt: 'She looks like "
+                           "the woman in <Picture 1>.'"}),
+            "voice_ref": ("AUDIO", {
+                "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
+                           "reference audio (<Audio 1>). Feed a clean solo "
+                           "line of the character and the voice is PINNED "
+                           "across the chain instead of re-performed from "
+                           "text. The bank carries voice too, but only from "
+                           "shot 2 on - this covers shot 1 as well. Trimmed to "
+                           "15s; reference rows cost speed on every step."}),
+            "sampler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a sampler NAME here (e.g. from H3 Studio "
+                           "Controls) to drive this widget from one master "
+                           "source. Overrides sampler_name when connected."}),
+            "scheduler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a scheduler NAME here to single-source it. "
+                           "Overrides scheduler when connected."}),
+            "self_anchor_voice": ("BOOLEAN", {
+                "default": False, "label_on": "anchor to shot 1's voice",
+                "label_off": "off",
+                "tooltip": "AUTOMATIC voice identity: after shot 1 renders, "
+                           "its own audio becomes the reference (<Audio 1>) "
+                           "for every later shot - the voice the model "
+                           "actually performed is pinned, no file needed. "
+                           "Write shot 1 so the character speaks a clean "
+                           "solo line. An external voice_ref, if connected, "
+                           "takes priority."}),
+            "reference_image_size": (["match", "max"], {
+                "default": "match",
+                "tooltip": "Reference image sizing. 'match' scales each ref "
+                           "(down only, keeping aspect) to the generation's "
+                           "pixel area; 'max' uses the reference pipeline's "
+                           "2048px short edge for best identity fidelity. "
+                           "Reference tokens ride through every sampling "
+                           "step, so 'max' can be several times slower."}),
+            "preview_first_shot": ("BOOLEAN", {
+                "default": False, "label_on": "save shot 1 early",
+                "label_off": "off",
+                "tooltip": "Write shot 1 to output/video/H3_FIRSTSHOT/ the "
+                           "MOMENT it finishes decoding - minutes before the "
+                           "full chain completes - so a bad take can be "
+                           "cancelled early. The full path is printed to the "
+                           "console."}),
+            "output_scale": ("FLOAT", {
+                "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
+                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
+                           "This is a lanczos resize of the finished frames, "
+                           "not a second diffusion pass: it adds resolution, "
+                           "not detail. It is applied per shot, so peak memory "
+                           "is one shot rather than the whole chain, and it "
+                           "works with EVERY continuity mode including "
+                           "context_pin, because it happens after sampling. "
+                           "The memory bank still stores base-resolution "
+                           "clips, so conditioning and VRAM are unchanged."}),
+            "upscale_model": ("UPSCALE_MODEL", {
+                "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
+                           "(ESRGAN and friends) to synthesise detail instead "
+                           "of merely resizing. Applied per shot after decode, "
+                           "at the model's own factor; if output_scale is also "
+                           "set, the result is resized to land exactly there. "
+                           "Slower than output_scale and it invents texture - "
+                           "on a chain, judge it on the LAST shot, where any "
+                           "texture ratchet is worst."}),
+            "sigmas": ("SIGMAS", {
+                "tooltip": "Optional custom sigma schedule, replacing "
+                           "sampler/scheduler + steps entirely. Some turbo "
+                           "LoRAs ship a schedule they need in order to work "
+                           "at all. When this is connected the 'steps' and "
+                           "'scheduler' widgets are IGNORED - the step count "
+                           "becomes len(sigmas)-1 - and the console says so. "
+                           "The two-pass upscale split is taken as a fraction "
+                           "of the supplied schedule."}),
+            "save_every_shot": ("BOOLEAN", {
+                "default": False, "label_on": "write each shot as it decodes",
+                "label_off": "off",
+                "tooltip": "Write EVERY shot to output/video/H3_SHOTS/ the "
+                           "moment it decodes, in addition to the master. "
+                           "Insurance for long chains: everything that fails "
+                           "after the last shot - a mux OOM, a full disk, a "
+                           "cancelled tab - otherwise destroys the whole "
+                           "render at once. Shots are written BEFORE the seam "
+                           "trim, so consecutive files overlap by ~1s; the "
+                           "master is still the clean join. Costs one file "
+                           "write per shot."}),
+            "audio_tone_control": (["off", "flatten"], {
+                "default": "off",
+                "tooltip": "Audio twin of chain_gain_control, aimed the other "
+                           "way: chained audio drifts DULLER per hop where "
+                           "video drifts sharper. Measured on 8-shot chains: "
+                           "4-10 kHz energy fell 8-13% even with the pinned "
+                           "bank slot, and 84-92% without it (bank_pinned=0). "
+                           "'flatten' EQ-matches every shot's long-term "
+                           "spectral envelope to shot 1's before the weld - "
+                           "constant per-shot gains (a linear filter, no "
+                           "pumping), clamped to +/-9 dB, half-strength in "
+                           "the top band so it cannot manufacture hiss."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
+    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered",
+                    "video_latents", "audio_latents", "head_frames")
+    OUTPUT_TOOLTIPS = (
+        "The joined master, seams trimmed.",
+        "Master audio.",
+        "How many shots rendered.",
+        "Every shot's video latent EXACTLY as sampled, batched along dim 0 "
+        "(one entry per shot), UNTRIMMED. Shots after the first open with "
+        "head_frames of replayed material from the previous shot's tail - "
+        "that is what makes the join seamless, and it is removed at decode, "
+        "not in the latent. So this does NOT line up with master_frames "
+        "until you trim it yourself. Latent temporal rows for F frames are "
+        "5*((F-5)//17)+2.",
+        "The matching audio latent per shot, same batching, same caveat.",
+        "Frames of replayed head carried by every shot AFTER the first "
+        "(0 for shot 1, and 0 for continuity modes that do not pin). Trim "
+        "this many frames off the front of each later shot after you decode.")
+    FUNCTION = "run"
+    CATEGORY = "sampling/minimax"
+
+    def run(self, model, clip, video_vae, audio_vae, script, shot_count, width,
+            height, frames_per_shot, seed, steps, memory_frames, anchor_frames,
+            seed_per_shot=True, start_image=None,
+            sampler_name="res_multistep", scheduler="simple",
+            bank_pinned=1, chain_gain_control="off", bank_clip_frames=22,
+            continuity="cut", color_level="off", join_anchor_noise=0.0,
+            join_blend=False, handoff_release=0.30, bank_ref_noise=0.0,
+            end_anchor=False, join_fx="off", audio_lock=True,
+            handoff_taper=0, handoff_depth="block", guide_audio=None,
+            keyframe_images=None, reference_images=None, voice_ref=None,
+            sampler_override=None, scheduler_override=None,
+            self_anchor_voice=False, reference_image_size="match",
+            preview_first_shot=False,
+            save_every_shot=False, sigmas=None, output_scale=1.0,
+            upscale_model=None, audio_tone_control="off"):
+        # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
+        # the raw latent between passes, and H3's latent is not a spatially
+        # smooth representation - interpolated values land off-manifold and
+        # pass 2, running at low sigma, has no room to pull them back. Three
+        # A/Bs at the previously documented recipe (14 steps, beta57) came
+        # back as colour-noise mush against clean single-pass controls, with
+        # shot 1 - which carries no pin at all - destroyed identically, so it
+        # was never about the chaining. Upscaling now happens AFTER decode
+        # (output_scale / upscale_model), where it cannot leave the manifold.
+        # The branches below are kept only so the diff stays readable; they
+        # are unreachable.
+        two_pass_upscale = False
+        upscale_factor, pass1_fraction, upscale_audio_denoise = 1.5, 0.4, 0.35
+        if sampler_override and str(sampler_override).strip():
+            sampler_name = str(sampler_override).strip()
+        if scheduler_override and str(scheduler_override).strip():
+            scheduler = str(scheduler_override).strip()
+        import torch
+        import node_helpers
+        from comfy_extras import nodes_custom_sampler as ncs
+        from comfy_extras import nodes_minimax_h3 as mmh3
+        from comfy_extras.nodes_audio import vae_decode_audio
+        import comfy.model_management as _mm
+
+        shots = _parse_script(script)
+        n = shot_count if shot_count > 0 else len(shots)
+        if len(shots) > n:
+            shots = shots[:n]
+        while len(shots) < n:
+            shots.append(shots[-1])
+
+        if sigmas is not None and len(sigmas) > 1:
+            # a supplied schedule wins: some turbo LoRAs only converge on the
+            # exact curve they shipped with, and silently re-deriving one from
+            # steps+scheduler would make them look broken rather than misused
+            steps = int(len(sigmas)) - 1
+            print("[%s] custom sigmas supplied (%d steps): the steps and "
+                  "scheduler widgets are ignored for this run."
+                  % ("H3Memory", steps), flush=True)
+        else:
+            sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler,
+                                                     steps, 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
+
+        # --- voice anchor: encode ONCE, ride in every shot's conditioning ---
+        # The bank already carries voice from shot 2 on, but shot 1 renders
+        # against an empty bank; an explicit ref covers the whole chain.
+        voice_block = None
+        if voice_ref is not None:
+            _vw = voice_ref["waveform"]
+            if _vw.ndim == 2:
+                _vw = _vw.unsqueeze(0)
+            _vw = _vw[:1]
+            if _vw.shape[1] == 1:          # mono crashes the packed layout
+                _vw = _vw.repeat(1, 2, 1)
+            elif _vw.shape[1] > 2:
+                _vw = _vw[:, :2]
+            _vsr = int(voice_ref["sample_rate"])
+            _vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+            if _vsr != _vae_sr:
+                import torchaudio
+                _vw = torchaudio.functional.resample(_vw, _vsr, _vae_sr)
+                _vsr = _vae_sr
+            _lim = 15 * _vsr               # ref rows cost speed EVERY step
+            if _vw.shape[-1] > _lim:
+                _vw = _vw[..., :_lim]
+            _vz = audio_vae.encode(_vw.movedim(1, -1))       # [1, 32, 2, T]
+            voice_block = {"kind": "audio", "ref_audio_t": _vz.shape[-1],
+                           "audio_latent": _vz}
+            print(f"[H3Memory] voice anchor: {_vw.shape[-1] / _vsr:.1f}s ref "
+                  f"audio rides in every shot as <Audio 1>.", flush=True)
+
+        # --- subject/character reference images: encode ONCE, fixed slots ---
+        import math as _math_ri
+        ref_image_items, ref_image_blocks = [], []
+        if reference_images is not None:
+            for _ri in range(reference_images.shape[0]):
+                _img = reference_images[_ri:_ri + 1]
+                _h, _w = _img.shape[1], _img.shape[2]
+                if reference_image_size == "match":
+                    _sc = min(1.0, _math_ri.sqrt((width * height) / (_w * _h)))
+                else:
+                    _sc = min(1.0, mmh3.REF_IMAGE_SHORT_EDGE / min(_w, _h))
+                _tw = max(mmh3.CANVAS_MULTIPLE,
+                          round(_w * _sc / mmh3.CANVAS_MULTIPLE)
+                          * mmh3.CANVAS_MULTIPLE)
+                _th = max(mmh3.CANVAS_MULTIPLE,
+                          round(_h * _sc / mmh3.CANVAS_MULTIPLE)
+                          * mmh3.CANVAS_MULTIPLE)
+                _rz = mmh3._resize(_img, _tw, _th, "disabled")
+                ref_image_items.append({"type": "image", "data": _rz})
+                ref_image_blocks.append({"kind": "image",
+                                         "latent_h": _th // 16,
+                                         "latent_w": _tw // 16,
+                                         "latent": video_vae.encode(_rz)})
+            print(f"[H3Memory] {len(ref_image_blocks)} reference image(s) ride "
+                  f"in every shot as <Picture 1..{len(ref_image_blocks)}>.",
+                  flush=True)
+
+        # --- two-pass upscale setup: low-res pass 1, exact full-res pass 2 ---
+        # The raw-latent continuity modes pin the previous shot's latents into
+        # THIS shot's grid. Pass 1 runs on a smaller grid, so the pin does not
+        # fit - and resampling it would destroy the bit-identical hand-off that
+        # is the entire reason those modes exist. Refuse rather than degrade.
+        _tp_tr = _tp_w1 = _tp_h1 = _tp_sig_hi = _tp_sig_lo = None
+        _tp_lat_th = _tp_lat_tw = None
+        _tp_lat_h1 = _tp_lat_w1 = None   # pass-1 latent grid (pin target)
+        if two_pass_upscale:
+            if continuity == "latent_handoff":
+                raise ValueError(
+                    "two_pass_upscale is not compatible with continuity="
+                    "'latent_handoff'. That mode renoises the previous tail "
+                    "into the CURRENT trajectory at every step, and a "
+                    "two-pass render is two trajectories - the handoff would "
+                    "be dropped halfway. Use continuity=context_pin, which "
+                    "does support two_pass_upscale (the pin is resampled "
+                    "onto the pass-1 grid), or turn two_pass_upscale off.")
+            _tp_tr = _load_upscaler_utils()
+            _f = max(1.0, float(upscale_factor))
+            _tp_w1 = max(32, int(round(width / _f / 32)) * 32)
+            _tp_h1 = max(32, int(round(height / _f / 32)) * 32)
+            _k = int(round(steps * float(pass1_fraction)))
+            _k = max(1, min(steps - 1, _k))
+            _tp_sig_hi, _tp_sig_lo = sigmas[:_k + 1], sigmas[_k:]
+            _probe, _ = mmh3._empty_av_latent(width, height, frames_per_shot)
+            _pv = _probe["samples"]
+            _pv = _pv.unbind()[0] if getattr(_pv, "is_nested", False) else _pv
+            _tp_lat_th, _tp_lat_tw = int(_pv.shape[-2]), int(_pv.shape[-1])
+            del _probe, _pv
+            print(f"[H3Memory] two-pass: {_tp_w1}x{_tp_h1} for {_k} steps -> "
+                  f"latent x{width / _tp_w1:.2f} -> {width}x{height} for "
+                  f"{steps - _k} steps (audio_denoise "
+                  f"{upscale_audio_denoise}).", flush=True)
+
+        # H3 allows at most 3 video references, so the bank is capped there
+        cap = max(1, min(3, int(bank_pinned) + int(memory_frames)))
+        # task/checkpoint guard: continuity mode dictates the checkpoint.
+        _ckpt = str(getattr(getattr(model, "model", None),
+                            "h3_checkpoint_name", "") or "").lower()
+        if _ckpt:
+            _is_fl = "fl2va" in _ckpt
+            _is_ref = "ref2va" in _ckpt
+            if continuity == "first_frame" and _is_ref:
+                print("[H3Memory] WARNING: continuity=first_frame hands the "
+                      "previous last frame over as the fl2va task, but a "
+                      "ref2va checkpoint is loaded. The hand-off will be "
+                      "weak (soft keyframe only). Load an fl2va checkpoint.",
+                      flush=True)
+            elif continuity != "first_frame" and _is_fl and bank_pinned >= 0 \
+                    and memory_frames > 0:
+                print("[H3Memory] WARNING: the memory bank needs reference "
+                      "rows (ref2va), but an fl2va checkpoint is loaded. "
+                      "Bank slots will be ignored - use continuity="
+                      "first_frame with fl2va, or load ref2va.", flush=True)
+
+        bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
+        frames_parts, audio_parts = [], []
+        _lat_v_parts, _lat_a_parts = [], []   # issue #12: raw per-shot latents
+        sr = None
+        _cg_ref = None
+        _CG_WIN = 24
+        last_tail = None       # seamless modes: the physical join frames
+        _TAIL_K = 2            # bracket depth: pixel frames -9/-5/-1 -> idx 0/4/8
+        _OV = 1 + 4 * _TAIL_K  # overlap frames regenerated by the next shot
+        _dbg_pins = []         # (frame_index, clean pinned image) for adherence
+        # latent_handoff geometry. Video latent: 2 bootstrap rows for the
+        # first 5 frames, then 5 rows per 17-frame block. The bootstrap rows
+        # have a different encoding structure than block rows, so the lock
+        # covers the first FULL block (rows 2..6 <- prev rows -5:, i.e. new
+        # frames 5..21 replay prev frames -17..-1) and the free 5-frame head
+        # is warmup that gets trimmed. Audio latent runs at 40 latent-fps
+        # with uniform structure: lock the whole head (cols 0..36 <- prev
+        # cols -37:, ~0.92s) so no arbitrary audio precedes the replay.
+        _HO_ROWS = 5 if handoff_depth == "block" else 2
+        _HO_R0 = 2 if handoff_depth == "block" else 0
+        _HO_ACOLS = 37 if handoff_depth == "block" else 8
+        _OV_HO = 22 if handoff_depth == "block" else 5
+        _HO_GUARD = 16         # onset-guard cols (0.4s of locked room tone)
+        _ho_v = _ho_a = None   # previous shot's tail latents
+        _ho_taper_src = None   # last row, for the post-lock pose taper
+        _ho_guard = None       # encoded room tone for the onset guard
+        _ho_wav_tail = None    # previous shot's tail waveform (fidelity log)
+        _house_frame = None    # shot 1 frame 0: the canonical framing
+        _spine = None          # encoded audio spine (guide_audio)
+        # per-join output trim, by mode - also the spine's per-shot stride
+        # context_pin trims a fixed 22-frame regenerated head per join and
+        # flf_chain drops the 1 duplicated boundary frame - both MUST be in
+        # this table or the audio-spine stride walks ahead of the picture
+        # by the trim amount per join (cold-read verified 2026-08-10).
+        _TRIM = {"cut": 0, "seamless": 1, "first_frame": 1, "flf_chain": 1,
+                 "seamless_tail": _OV, "latent_handoff": _OV_HO,
+                 "context_pin": 22}.get(continuity, 0)
+        if guide_audio is not None:
+            _gw3, _g_sr = _wav_for_vae(audio_vae, guide_audio, "audio spine")
+            _spine = audio_vae.encode(_gw3.movedim(1, -1)).detach()
+            print("[H3Memory] audio spine: %d cols (%.1fs) - every shot's "
+                  "audio is locked to a slice of it, so the VOICE cannot "
+                  "change between shots (fl2va has no reference rows to "
+                  "carry a voice; this is how you keep one performance)."
+                  % (_spine.shape[-1],
+                     _gw3.shape[-1] / float(_g_sr)),
+                  flush=True)
+            if two_pass_upscale:
+                # the spine lock lives in a predict_noise patch built around
+                # ONE guider; pass 2 runs its own guider, so half the
+                # trajectory would sample unlocked audio and the voice would
+                # move exactly where the spine exists to hold it still
+                raise ValueError(
+                    "two_pass_upscale cannot be combined with an audio spine "
+                    "(guide_audio). The spine locks audio through every "
+                    "sampling step of a single trajectory; a two-pass render "
+                    "is two trajectories. Disconnect guide_audio, or turn "
+                    "two_pass_upscale off.")
+        _cc_mu = _cc_cov = None  # house colour stats (shot 1 settled tail)
+        _at_house = None         # house audio envelope (shot 1)
+        _cp_prev = None   # context_pin: previous shot's full AV latent
+        _cp_trim = 0
+
+        if bank_pinned == 0 and n > 4:
+            print("[H3Memory] WARNING: bank_pinned=0 on a %d-shot chain. "
+                  "With no pinned slot the conditioning is pure recency - "
+                  "each shot hears only the one before it - and audio "
+                  "COLLAPSES: measured 84-92%% loss of 4-10 kHz energy by "
+                  "shot 8 (five-arm A/B, 2026-08-11). Set bank_pinned=1, "
+                  "and consider audio_tone_control=flatten." % n, flush=True)
+        print(f"[H3Memory] JoyEcho-style memory bank: no keyframe, "
+              f"{bank_pinned} pinned + {cap - min(bank_pinned, cap)} recent "
+              f"slot(s), {_jb_grid(bank_clip_frames)}f clips. Needs a ref2va "
+              f"checkpoint.", flush=True)
+
+        for si, prompt in enumerate(shots):
+            if two_pass_upscale:
+                latent, frame_count = mmh3._empty_av_latent(
+                    _tp_w1, _tp_h1, frames_per_shot)
+                _p1v, _p1n = _tp_tr.extract_tensor(latent["samples"])
+                _tp_lat_h1 = int(_p1v[0].shape[-2])
+                _tp_lat_w1 = int(_p1v[0].shape[-1])
+            else:
+                latent, frame_count = mmh3._empty_av_latent(width, height,
+                                                            frames_per_shot)
+            ref_items, ref_blocks = [], []
+            kf_vision = []     # first_frame mode: images -> vision tokens
+
+            # operator-supplied refs go FIRST and never move: the bank grows
+            # from shot to shot, so anything appended after it would change
+            # <Picture n> / <Audio n> numbering mid-chain and break the
+            # prompt's bindings. Items and blocks stay in the same sequence.
+            for _it, _bl in zip(ref_image_items, ref_image_blocks):
+                ref_items.append(_it)
+                ref_blocks.append(_bl)
+            if voice_block is not None:
+                ref_items.append({"type": "audio"})
+                ref_blocks.append(voice_block)
+
+            # identity reference image(s) - JoyEcho seeds identity, the bank
+            # carries it afterwards
+            if start_image is not None and anchor_frames > 0:
+                img = start_image[:1]
+                ih, iw = int(img.shape[1]), int(img.shape[2])
+                import math as _math
+                sc = min(1.0, _math.sqrt((width * height) / max(iw * ih, 1)))
+                tw = max(32, round(iw * sc / 32) * 32)
+                th = max(32, round(ih * sc / 32) * 32)
+                rz = mmh3._resize(img, tw, th, "disabled")
+                ref_items.append({"type": "image", "data": rz})
+                ref_blocks.append({"kind": "image", "latent_h": th // 16,
+                                   "latent_w": tw // 16,
+                                   "latent": video_vae.encode(rz)})
+
+            # bank slots -> video_audio references, built the way core does.
+            # first_frame mode runs on an fl2va checkpoint, which has no
+            # reference rows - the hand-off frame carries continuity.
+            for clip_frames, clip_audio in (
+                    [] if continuity == "first_frame" else bank.frames()):
+                vh, vw = int(clip_frames.shape[1]), int(clip_frames.shape[2])
+                cw, ch = mmh3.adapt_canvas(vw, vh)
+                if vw * vh < cw * ch:
+                    cw = max(32, round(vw / 32) * 32)
+                    ch = max(32, round(vh / 32) * 32)
+                fr = mmh3._resize(clip_frames, cw, ch, "disabled")
+                fr = fr[:_jb_grid(fr.shape[0])]
+                z = video_vae.encode(fr)
+                a_lat, a_t = mmh3.MiniMaxH3ReferenceToVideo._encode_ref_audio(
+                    audio_vae, clip_audio)
+                # the soundtrack takes its own <Audio j>, emitted before <Video k>
+                ref_items.append({"type": "audio"})
+                idx = list(range(0, fr.shape[0], mmh3.FPS // 2))
+                ref_items.append({"type": "video", "data": fr[idx],
+                                  "timestamps": [i / 2.0 for i in range(len(idx))]})
+                ref_blocks.append({"kind": "video_audio", "latent_t": z.shape[2],
+                                   "latent_h": ch // 16, "latent_w": cw // 16,
+                                   "ref_audio_t": a_t, "latent": z,
+                                   "audio_latent": a_lat})
+
+            keyframes = []
+            if continuity == "flf_chain" and keyframe_images is None:
+                # a silent no-op here renders a full unanchored chain and
+                # the operator finds out hours later - fail loudly instead
+                raise ValueError(
+                    "continuity=flf_chain but keyframe_images is empty. "
+                    "Wire N+1 boundary plates (and enable their gate) for "
+                    "N shots, or switch continuity to context_pin.")
+            if continuity == "flf_chain" and keyframe_images is not None:
+                # TRUE FFLF: shot i runs between boundary image i and i+1.
+                # The join is ONE shared picture used as the end of one shot
+                # and the start of the next, so there is nothing to drift
+                # and nothing to colour-correct at the boundary.
+                _n_kf = keyframe_images.shape[0]
+                _a = keyframe_images[min(si, _n_kf - 1):min(si, _n_kf - 1) + 1]
+                _kf_a = mmh3._resize(_a, width, height, "disabled")
+                kf_vision.append(_kf_a)
+                keyframes.append({"resolved_frame_index": 0, "image": _kf_a})
+                if si + 1 < _n_kf:
+                    _b = keyframe_images[si + 1:si + 2]
+                    _kf_b = mmh3._resize(_b, width, height, "disabled")
+                    kf_vision.append(_kf_b)
+                    keyframes.append(
+                        {"resolved_frame_index": frame_count - 1,
+                         "image": _kf_b})
+                    # the documented FL2VA alignment instruction, first line
+                    prompt = (
+                        "How the reference pictures align with the target "
+                        "video - Picture 1 (from Shot 1) aligns with the "
+                        "0.00-second mark of the target video; Picture 2 "
+                        "(from Shot 1) aligns with the %.2f-second mark of "
+                        "the target video.\n\n" % (frame_count / 24.0)
+                    ) + prompt
+                print("[H3Memory] FFLF shot %d: pinned between boundary "
+                      "keyframes %d and %d" % (si + 1, si, min(si + 1,
+                                                               _n_kf - 1)),
+                      flush=True)
+            elif last_tail is not None and continuity == "first_frame":
+                # the model's own hand-off: the previous last frame goes in
+                # BOTH ways the stock Image-to-Video node sends it - vision
+                # tokens through the text encoder AND the frame-0 keyframe
+                # latent. A keyframe latent alone is a weak hint; the vision
+                # path is the conditioning fl2va was trained on.
+                kf_img = mmh3._resize(last_tail[-1:], width, height,
+                                      "disabled")
+                kf_vision.append(kf_img)
+                keyframes.append({"resolved_frame_index": 0,
+                                  "image": kf_img})
+            elif last_tail is not None and continuity == "seamless":
+                kf_img = mmh3._resize(last_tail[-1:], width, height, "disabled")
+                keyframes.append({"resolved_frame_index": 0, "image": kf_img})
+            elif last_tail is not None and continuity == "seamless_tail":
+                # tail bracket: previous pixel frames -9/-5/-1 pinned at
+                # keyframe indices 0/4/8 (one per latent block on the 4x
+                # temporal grid). The join is over-determined: position,
+                # exposure and velocity are all specified by real frames.
+                #
+                # Indices 4 and 8 are INTERIOR anchors, which stock comfy
+                # rejects. Our layout patch generalises the math, but it
+                # stands down when ComfyUI-H3-Motion-Context is installed -
+                # and MC's layout patch only serves rows carrying its own
+                # marker, so THESE keyframes fall through to stock and the
+                # chain dies mid-render with "only first/last keyframe
+                # anchors are supported" (user-reported, 2026-08-11). Fail
+                # BEFORE any sampling, with the fix in the message.
+                try:
+                    from .h3_interior_patch import (_motion_context_present,
+                                                    ensure_interior_keyframes)
+                except ImportError:
+                    try:
+                        from h3_interior_patch import (
+                            _motion_context_present, ensure_interior_keyframes)
+                    except ImportError:
+                        # loose install: the module sits beside this file but
+                        # is not importable by name (same fallback as
+                        # h3_keyframes.py)
+                        import importlib.util as _ilu
+                        import os as _os
+                        _p = _os.path.join(_os.path.dirname(
+                            _os.path.abspath(__file__)),
+                            "h3_interior_patch.py")
+                        _s = _ilu.spec_from_file_location(
+                            "h3_interior_patch", _p)
+                        _m = _ilu.module_from_spec(_s)
+                        _s.loader.exec_module(_m)
+                        _motion_context_present = _m._motion_context_present
+                        ensure_interior_keyframes = _m.ensure_interior_keyframes
+                _mc_pack = _motion_context_present()
+                if _mc_pack:
+                    raise ValueError(
+                        "continuity=seamless_tail needs interior keyframe "
+                        f"anchors, and {_mc_pack} owns that patch site but "
+                        "only serves its own nodes - the chain would crash "
+                        "mid-render. Use continuity=context_pin (better, and "
+                        "it is what that pack is for), or first_frame, or "
+                        "remove that pack to use seamless_tail.")
+                _ik_ok, _ik_msg = ensure_interior_keyframes(verbose=False)
+                if not _ik_ok:
+                    raise ValueError(
+                        "continuity=seamless_tail needs interior keyframe "
+                        f"anchors and the layout patch failed: {_ik_msg}. "
+                        "Use continuity=first_frame or context_pin instead.")
+                for j in range(_TAIL_K + 1):
+                    pi = -(1 + 4 * (_TAIL_K - j))          # -9, -5, -1
+                    src = last_tail[pi:pi + 1] if pi != -1 else last_tail[-1:]
+                    kf_img = mmh3._resize(src, width, height, "disabled")
+                    _dbg_pins.append((4 * j, kf_img[0].detach().cpu().clone()))
+                    keyframes.append({"resolved_frame_index": 4 * j,
+                                      "image": kf_img})
+            if (last_tail is not None and continuity == "latent_handoff"
+                    and handoff_depth == "bootstrap"):
+                # bootstrap depth: the 2-row latent lock is a weak video
+                # anchor - back it with a frame-0 keyframe pin of the
+                # previous last frame (soft, but end_anchor and the bank
+                # carry the rest)
+                kf_img = mmh3._resize(last_tail[-1:], width, height,
+                                      "disabled")
+                keyframes.append({"resolved_frame_index": 0,
+                                  "image": kf_img})
+            if (end_anchor and continuity == "first_frame" and si > 0
+                    and _house_frame is not None):
+                # fl2va reads first+last as "travel from A to B" and
+                # invents a camera move to fill the middle (render-verified:
+                # shot 2 pushed into an extreme close-up and back out).
+                # Hand it ONLY the first frame and let it continue.
+                if si == 1:
+                    print("[H3Memory] end_anchor ignored in first_frame "
+                          "mode: a last-frame pin makes fl2va plan a camera "
+                          "MOVE between the two frames. Control drift with "
+                          "prompt wording instead.", flush=True)
+            elif end_anchor and _house_frame is not None and si > 0:
+                # return-to-house DOUBLE pin at the shot's tail: closes the
+                # compounding push-in creep so the next join inherits a tail
+                # the text agrees with. One pin at the last frame gets
+                # outvoted by committed motion (render-verified: a tail
+                # lean-in ran straight through it); a second pin half a
+                # second earlier makes the hold bracket-strength and reads
+                # as her settling for the beat. Rides through the same
+                # encode loop below, so join_anchor_noise applies too.
+                kf_img = mmh3._resize(_house_frame, width, height, "disabled")
+                keyframes.append(
+                    {"resolved_frame_index": frames_per_shot - 1,
+                     "image": kf_img})
+                if frames_per_shot > 21:
+                    keyframes.append(
+                        {"resolved_frame_index": frames_per_shot - 13,
+                         "image": kf_img})
+
+            print("[H3Memory] shot %d/%d (%df @ %dx%d) | bank %s%s"
+                  % (si + 1, n, frames_per_shot, width, height, bank.describe(),
+                     " + identity ref" if (start_image is not None
+                                           and anchor_frames > 0) else ""),
+                  flush=True)
+
+            if kf_vision:
+                tokens = clip.tokenize(prompt, images=kf_vision)
+            elif ref_items:
+                _sd = _subject_defs(
+                    sum(1 for i in ref_items if i["type"] == "image"),
+                    sum(1 for i in ref_items if i["type"] == "audio"),
+                    sum(1 for i in ref_items if i["type"] == "video"))
+                if _sd:
+                    if si == 1:
+                        print("[H3Memory] subject_definitions added for %d "
+                              "reference item(s) - the model is now told "
+                              "what the refs ARE and to preserve identity, "
+                              "room, colour and voice timbre"
+                              % len(ref_items), flush=True)
+                    prompt = prompt.rstrip() + "\n" + _sd
+                tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
+            else:
+                tokens = clip.tokenize(prompt)
+            cond = clip.encode_from_tokens_scheduled(tokens)
+            cond_hi = cond if two_pass_upscale else None
+
+            def _encode_kfs(kfs, tw, th):
+                """Encode a keyframe list onto a tw x th grid, in place."""
+                for kf_i, kf_ in enumerate(kfs):
+                    z = video_vae.encode(
+                        mmh3._resize(kf_.pop("image"), tw, th, "disabled"))
+                    if join_anchor_noise > 0:
+                        # noised clean condition: the model must not treat its
+                        # own output as pristine (that is the 1.2x ratchet).
+                        # Seeded so same-seed A/B arms stay clean.
+                        g = torch.Generator(device=z.device).manual_seed(
+                            (shot_seed ^ 0x5EED) + kf_i)
+                        t_add = float(join_anchor_noise)
+                        z = (1.0 - t_add) * z + t_add * torch.randn(
+                            z.shape, generator=g, device=z.device, dtype=z.dtype)
+                    kf_["latent"] = z
+                return kfs
+
+            if keyframes:
+                # two-pass pins the SAME pixels on both grids - encoding twice
+                # is cheap and exact, where resampling a latent is neither
+                kfs_hi = ([{"resolved_frame_index": k["resolved_frame_index"],
+                            "image": k["image"]} for k in keyframes]
+                          if two_pass_upscale else None)
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_keyframes": _encode_kfs(
+                        keyframes,
+                        _tp_w1 if two_pass_upscale else width,
+                        _tp_h1 if two_pass_upscale else height),
+                    "minimax_frame_count": frame_count,
+                })
+                if kfs_hi is not None:
+                    cond_hi = node_helpers.conditioning_set_values(cond_hi, {
+                        "minimax_keyframes": _encode_kfs(kfs_hi, width, height),
+                        "minimax_frame_count": frame_count,
+                    })
+            if ref_blocks:
+                cond = node_helpers.conditioning_set_values(
+                    cond, {"minimax_refs": ref_blocks})
+                if cond_hi is not None:
+                    cond_hi = node_helpers.conditioning_set_values(
+                        cond_hi, {"minimax_refs": ref_blocks})
+
+            # context_pin: reuse the Motion-Context node as a library via
+            # the registry - OUR features (bank, colour levels, join fx)
+            # stay; THEIR mechanism (interior latent pin + timeline audio
+            # ref + payload coexistence patches) rides on the conditioning.
+            _cp_trim = 0
+            if (continuity == "context_pin" and si > 0
+                    and _cp_prev is not None):
+                import nodes as _nodes_mod
+                _mc_cls = _nodes_mod.NODE_CLASS_MAPPINGS.get(
+                    "MiniMaxH3MotionContext")
+                if _mc_cls is None:
+                    # ethanfel's ComfyUI-MiniMaxH3-Contex-Loop is a fork of the
+                    # same project, but it deliberately does NOT re-register
+                    # MiniMaxH3MotionContext - that id stays with upstream, by
+                    # its own design. Someone who installed the fork INSTEAD of
+                    # upstream has a pack full of H3 chain nodes and still no
+                    # context_pin, and the old message sent them looking for a
+                    # pack they thought they already had (user-reported).
+                    _fork = any(
+                        k in _nodes_mod.NODE_CLASS_MAPPINGS
+                        for k in ("MiniMaxH3ChainLoopStart",
+                                  "MiniMaxH3LoopTrim",
+                                  "MiniMaxH3ChainAssemble"))
+                    raise RuntimeError(
+                        "continuity=context_pin needs the "
+                        "ComfyUI-H3-Motion-Context pack by NikoDemon80 "
+                        "(github.com/NikoDemon80/ComfyUI-H3-Motion-Context) - "
+                        "it provides the MiniMaxH3MotionContext node."
+                        + (" You appear to have ethanfel's "
+                           "ComfyUI-MiniMaxH3-Contex-Loop fork installed. That "
+                           "is a COMPLEMENT, not a replacement: it "
+                           "deliberately leaves the MiniMaxH3MotionContext id "
+                           "to upstream, so install NikoDemon80's pack as well "
+                           "- the two are designed to coexist and this pack "
+                           "works with either one's runtime patches."
+                           if _fork else
+                           " If you installed a fork instead, note that forks "
+                           "may leave that node id to upstream on purpose."))
+                # The pin is raw latents from the PREVIOUS shot, sampled at
+                # full resolution. Pass 1 runs on a smaller grid, so the pin
+                # has to be resampled onto that grid or the shapes simply do
+                # not meet - which is what used to make this combination an
+                # error. Pass 2 is unpinned by construction (cond_hi is
+                # snapshotted before this line), so it inherits the seam
+                # through the upscaled pass-1 latent rather than re-deriving
+                # it, and never sees a pin at the wrong size.
+                _pin_src = _cp_prev
+                if two_pass_upscale and _cp_prev is not None:
+                    _pin_src = _upscale_av_exact(_tp_tr, _cp_prev,
+                                                 _tp_lat_h1, _tp_lat_w1)
+                    print("[H3Memory] two-pass: pin resampled to the pass-1 "
+                          "grid (%dx%d latent)" % (_tp_lat_h1, _tp_lat_w1),
+                          flush=True)
+                cond, _cp_trim = _mc_cls().apply(
+                    conditioning=cond, vae=video_vae, latent=latent,
+                    context_length="22", audio_context_length=22,
+                    context_latent=_pin_src)
+                print("[H3Memory] context_pin: previous shot's tail pinned "
+                      "as raw latents (22f video + 22f audio ref, trim %d "
+                      "on decode)" % _cp_trim, flush=True)
+
+            # issue #8: separate TE device -> nothing to reclaim, keep it hot
+            _te_dev = getattr(clip.patcher, "load_device", None)
+            _dit_dev = getattr(model, "load_device", None)
+            if (_te_dev is not None and _dit_dev is not None
+                    and str(_te_dev) != str(_dit_dev)):
+                if si == 0:
+                    print(f"[H3Memory] TE on {_te_dev}, DiT on {_dit_dev} - "
+                          f"separate devices, TE stays resident.", flush=True)
+            else:
+                try:
+                    clip.patcher.model.to(_mm.text_encoder_offload_device())
+                except Exception:
+                    pass
+                try:
+                    _dev = _mm.get_torch_device()
+                    _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                    _mm.soft_empty_cache()
+                    print("[H3Memory] TE evicted; %.1f GB free for the DiT"
+                          % (_mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
+                except Exception:
+                    pass
+
+            guider = ncs.BasicGuider().get_guider(model, cond)[0]
+            guider_hi = (ncs.BasicGuider().get_guider(model, cond_hi)[0]
+                         if two_pass_upscale else None)
+            if (_spine is not None
+                    or (continuity == "latent_handoff"
+                        and _ho_v is not None)):
+                # one denoise trajectory: every model call sees the previous
+                # shot's tail latents, renoised to the CURRENT sigma, sitting
+                # in the overlap slots of both streams. The prediction then
+                # continues that state - motion, exposure, and the word that
+                # was mid-air. Released below handoff_release so the final
+                # detail steps can reconcile the boundary.
+                # CRITICAL: comfy PACKS the nested AV latent into one flat
+                # [B,1,N] tensor before sampling (CFGGuider.sample ->
+                # pack_latents), so predict_noise receives the pack, never a
+                # NestedTensor. The lock is written through reshaped views
+                # of the pack. (An is_nested check here silently no-ops -
+                # render-verified failure.)
+                _ms_obj = model.get_model_object("model_sampling")
+                # THE TWO CLOCKS: H3 video rides the sampler's shift-12
+                # sigma; the audio stream lives on a shift-3 schedule
+                # internally. An audio lock injected at the VIDEO sigma is
+                # 2.5-4x noisier than the model's timestep declares during
+                # the plan-forming steps - the model reads it as hiss, not
+                # content (source-verified: comfy/ldm/minimax/model.py).
+                from comfy.ldm.minimax.model import time_shift_sigma as _tss
+                _dm = getattr(getattr(model, "model", None),
+                              "diffusion_model", None)
+                _shv = float(getattr(_dm, "sigma_shift_video", 12.0))
+                _sha = float(getattr(_dm, "sigma_shift_audio", 3.0))
+                _orig_pn = guider.predict_noise
+                _comps0 = latent["samples"].unbind()
+                _vshape = tuple(_comps0[0].shape)
+                _ashape = (tuple(_comps0[1].shape)
+                           if len(_comps0) > 1 else None)
+                _spine_seg = None
+                if _spine is not None and _ashape is not None:
+                    # this shot's time-slice of the spine: shots advance by
+                    # (frames_per_shot - trim) in output time, and the trim
+                    # depends on the continuity mode
+                    _a0 = int(round(si * (frames_per_shot - _TRIM)
+                                    / 24.0 * 40.0))
+                    _a0 = max(0, min(_a0, max(0, _spine.shape[-1] - 1)))
+                    _spine_seg = _spine[..., _a0:_a0 + _ashape[-1]]
+                _Nv = 1
+                for _d in _vshape[1:]:
+                    _Nv *= _d
+                _Na = 0
+                if _ashape is not None:
+                    _Na = 1
+                    for _d in _ashape[1:]:
+                        _Na *= _d
+
+                _alock = bool(audio_lock) or _spine_seg is not None
+
+                def _pn(x, timestep, model_options={}, seed=None,
+                        _o=_orig_pn, _hv=_ho_v, _ha=_ho_a, _hg=_ho_guard,
+                        _hs=_spine_seg, _ms=_ms_obj, _al=_alock,
+                        _r0=_HO_R0, _tss=_tss, _shv=_shv, _sha=_sha,
+                        _tp=int(handoff_taper), _tsrc=_ho_taper_src,
+                        _rel=float(handoff_release), _vs=_vshape,
+                        _as=_ashape, _Nv=_Nv, _Na=_Na,
+                        _state={"logged": False}):
+                    try:
+                        sig = float(timestep.flatten()[0])
+                    except Exception:
+                        sig = float(timestep)
+                    if (x.ndim == 3 and x.shape[1] == 1
+                            and x.shape[2] >= _Nv + _Na):
+                        try:
+                            x = x.clone()
+                            st = torch.tensor([sig], device=x.device,
+                                              dtype=x.dtype)
+                            sa = _tss(sig, _shv, _sha)
+                            sta = torch.tensor([sa], device=x.device,
+                                               dtype=x.dtype)
+                            if sig > _rel and _hv is not None:
+                                xv = x[:, 0, :_Nv].reshape(
+                                    (x.shape[0],) + _vs[1:])
+                                tv = _hv.to(device=x.device, dtype=x.dtype)
+                                xv[:, :, _r0:_r0 + tv.shape[2]] = \
+                                    _ms.noise_scaling(
+                                        st, torch.randn_like(tv), tv)
+                                if _tp > 0 and _tsrc is not None:
+                                    # graded taper: bias the rows AFTER the
+                                    # hard lock toward the previous tail at
+                                    # linearly decaying strength, so the
+                                    # pose has a ramp instead of a cliff
+                                    # (a hard lock end re-plans the body -
+                                    # measured 3x the room's discontinuity)
+                                    _t0 = _r0 + tv.shape[2]
+                                    _tn = min(_tp, xv.shape[2] - _t0)
+                                    if _tn > 0:
+                                        ts_ = _tsrc.to(device=x.device,
+                                                       dtype=x.dtype)
+                                        for _j in range(_tn):
+                                            _w = (_tn - _j) / (_tn + 1.0)
+                                            _tgt = _ms.noise_scaling(
+                                                st, torch.randn_like(ts_),
+                                                ts_)[:, :, 0]
+                                            xv[:, :, _t0 + _j] = (
+                                                (1.0 - _w) * xv[:, :, _t0 + _j]
+                                                + _w * _tgt)
+                            # AUDIO stays locked through EVERY step: video
+                            # release exists so detail steps can reconcile
+                            # texture, but audio content must be exact -
+                            # released late steps can still move speech
+                            # ONSETS into the replay window, and the trim
+                            # then chops the line's opening words
+                            # (review-verified: "If a civilization" and
+                            # "And before you say it" both swallowed).
+                            if _Na and _hs is not None:
+                                # spine mode: the WHOLE audio stream is a
+                                # locked slice of one continuous track -
+                                # nothing left for the model to plan.
+                                # Injected at the AUDIO clock.
+                                xa = x[:, 0, _Nv:_Nv + _Na].reshape(
+                                    (x.shape[0],) + _as[1:])
+                                ts = _hs.to(device=x.device, dtype=x.dtype)
+                                _nn = min(ts.shape[-1], xa.shape[-1])
+                                xa[..., :_nn] = _ms.noise_scaling(
+                                    sta, torch.randn_like(ts[..., :_nn]),
+                                    ts[..., :_nn])
+                            elif _Na and _al and _ha is not None:
+                                xa = x[:, 0, _Nv:_Nv + _Na].reshape(
+                                    (x.shape[0],) + _as[1:])
+                                ta = _ha.to(device=x.device, dtype=x.dtype)
+                                if _hg is not None:
+                                    ta = torch.cat(
+                                        [ta, _hg.to(device=x.device,
+                                                    dtype=x.dtype)],
+                                        dim=-1)
+                                xa[..., :ta.shape[-1]] = _ms.noise_scaling(
+                                    sta, torch.randn_like(ta), ta)
+                            if not _state["logged"]:
+                                _state["logged"] = True
+                                print("[H3Memory] handoff injection ACTIVE "
+                                      "(packed path, sigma %.3f)" % sig,
+                                      flush=True)
+                        except Exception as _e:
+                            print("[H3Memory] handoff injection FAILED: %r"
+                                  % (_e,), flush=True)
+                    return _o(x, timestep, model_options=model_options,
+                              seed=seed)
+
+                guider.predict_noise = _pn
+                print("[H3Memory] latent handoff armed: %d video rows, "
+                      "%d audio cols + %d guard cols%s, release below "
+                      "sigma %.2f"
+                      % (0 if _ho_v is None else _ho_v.shape[2],
+                         0 if _ho_a is None else _ho_a.shape[-1],
+                         0 if _ho_guard is None else _ho_guard.shape[-1],
+                         "" if _spine_seg is None else
+                         " + SPINE %d cols" % _spine_seg.shape[-1],
+                         float(handoff_release)), flush=True)
+            shot_seed = (seed + si) if seed_per_shot else seed
+            noise = ncs.RandomNoise().get_noise(shot_seed)[0]
+            # payload signature: continuity mode + position + bank/spine
+            # decide the conditioning payload, and with it the real pool
+            _auto_set_payload(
+                "%s%d_k%dr%d%s%s" % (
+                    continuity[:4], 1 if si > 0 else 0,
+                    len(keyframes), len(ref_blocks),
+                    "s" if _spine is not None else "",
+                    "2p" if two_pass_upscale else ""))
+            _mb = _auto_measure_begin()
+            try:
+                if two_pass_upscale:
+                    out1, _d1 = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, _tp_sig_hi, latent)
+                    up = _upscale_av_exact(_tp_tr, out1, _tp_lat_th,
+                                           _tp_lat_tw)
+                    _s = max(0.0, min(1.0, float(upscale_audio_denoise)))
+                    _members, _was_nested = _tp_tr.extract_tensor(up["samples"])
+                    if _was_nested and len(_members) >= 2:
+                        if _s <= 0.0:
+                            _ridx, _rstr = (0,), None
+                        elif _s >= 1.0:
+                            _ridx, _rstr = (0, 1), None
+                        else:
+                            _ridx, _rstr = (0, 1), {0: 1.0, 1: _s}
+                    else:
+                        _ridx = _rstr = None
+                    noise2 = ncs.RandomNoise().get_noise(shot_seed + 977)[0]
+                    up = _tp_tr.add_noise_nested_latent(
+                        model, noise2, _tp_sig_lo, up,
+                        renoise_indices=_ridx, noise_strengths=_rstr)
+                    up = _tp_tr.finalize_latent_for_handoff(up)
+                    out, _d = ncs.SamplerCustomAdvanced().sample(
+                        ncs.DisableNoise().get_noise()[0], guider_hi,
+                        sampler, _tp_sig_lo, up)
+                else:
+                    out, _d = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, sigmas, latent)
+            finally:
+                _auto_measure_end(_mb, model, steps=steps)
+
+            lat = out["samples"]
+            if continuity == "context_pin":
+                # the WHOLE AV latent, exactly as sampled - the next shot
+                # pins its tail bit-identically, no decode in the path
+                _cp_prev = {"samples": out["samples"]}
+            _a_lat = None
+            if getattr(lat, "is_nested", False):
+                _comps = lat.unbind()
+                _a_lat = _comps[1] if len(_comps) > 1 else None
+                lat = _comps[0]
+            # issue #12: keep each shot's latent exactly as sampled. Trimming
+            # here would be throwing the pin material away on the user's
+            # behalf, and the pin is the part that cannot be recovered later.
+            _lat_v_parts.append(lat.detach().cpu())
+            if _a_lat is not None:
+                _lat_a_parts.append(_a_lat.detach().cpu())
+            if continuity == "latent_handoff":
+                _ho_taper_src = (lat[:, :, -1:].detach().clone()
+                                 if handoff_taper > 0 else None)
+                _ho_v = lat[:, :, -_HO_ROWS:].detach().clone()
+                _ho_a = (_a_lat[..., -_HO_ACOLS:].detach().clone()
+                         if _a_lat is not None and audio_lock else None)
+            imgs = video_vae.decode(lat)
+            if imgs.ndim == 5:
+                imgs = imgs.reshape(-1, imgs.shape[-3], imgs.shape[-2],
+                                    imgs.shape[-1])
+            aud = vae_decode_audio(audio_vae, out)
+            sr = aud["sample_rate"]
+            wav = aud["waveform"]
+
+            # --- colour levelling to the FIXED house reference -----------
+            # before anchor extraction and bank ingest, so the next shot's
+            # conditioning inherits corrected statistics (closed loop)
+            if si == 0:
+                _house_frame = imgs[0:1].detach().clone()
+            if color_level == "mvgd":   # per-shot, rolling house reference
+                if si == 0:
+                    _cc_mu, _cc_cov = _cc_stats(imgs[-min(24, imgs.shape[0]):])
+                    print("[H3Memory] colour house stats set (shot 1 settled "
+                          "tail)", flush=True)
+                else:
+                    imgs = _cc_apply(imgs, _cc_mu, _cc_cov)
+                    print("[H3Memory] colour levelled to house", flush=True)
+
+
+            if audio_tone_control == "flatten":
+                if si == 0:
+                    _at_house = _at_ltas(wav, sr)
+                    print("[H3Memory] audio tone: house envelope set "
+                          "(shot 1)", flush=True)
+                elif _at_house is not None:
+                    wav, _gmax = _at_flatten(wav, _at_house, sr)
+                    if _gmax > 0:
+                        print("[H3Memory] audio tone: levelled to house "
+                              "(max band gain %.1f dB)" % _gmax, flush=True)
+
+            if chain_gain_control != "off":
+                _w = min(_CG_WIN, imgs.shape[0])
+                if si == 0:
+                    _cg_ref = _cg_lap_var(imgs[-_w:])
+                    print(f"[H3Memory] chain: house texture level "
+                          f"{_cg_ref:.5f}", flush=True)
+                if _cg_ref and chain_gain_control == "flatten":
+                    imgs, _s = _cg_flatten(imgs, _cg_ref)
+                    if _s > 0:
+                        print(f"[H3Memory] chain: levelled (sigma {_s:.2f})",
+                              flush=True)
+                elif _cg_ref and chain_gain_control == "match_output" and si > 0:
+                    if _cg_lap_var(imgs[:_w]) > _cg_ref * 1.05:
+                        _sig = _cg_sigma_for(imgs[:_w], _cg_ref)
+                        if _sig > 0:
+                            imgs = _cg_gauss(imgs, _sig)
+
+            if continuity == "first_frame" and si > 0 and last_tail is not None:
+                # did the model actually START on the handed-over frame?
+                _m0 = float((imgs[0].detach().cpu().float()
+                             - last_tail[-1].detach().cpu().float())
+                            .abs().mean())
+                print("[H3Memory] first_frame handover: frame0 vs prev last "
+                      "mad %.4f -> %s" % (_m0, "HELD" if _m0 < 0.03 else
+                                          "IGNORED (wrong checkpoint? "
+                                          "fl2va is required)"), flush=True)
+
+            if _dbg_pins:
+                # bracket adherence: the regenerated head frames should
+                # reproduce the pinned tail frames. Catches weak holds (a
+                # prompt fighting the bracket) and index misalignment (each
+                # pin also scored one frame early/late).
+                _msgs = []
+                for _idx, _src in _dbg_pins:
+                    _sc = {}
+                    for _d in (-1, 0, 1):
+                        _k = _idx + _d
+                        if 0 <= _k < imgs.shape[0]:
+                            _sc[_d] = float((imgs[_k].detach().cpu().float()
+                                             - _src.float()).abs().mean())
+                    if _sc:
+                        _best = min(_sc, key=_sc.get)
+                        _msgs.append("idx %d mad %.4f (best %+d: %.4f)"
+                                     % (_idx, _sc.get(0, float("nan")),
+                                        _best, _sc[_best]))
+                print("[H3Memory] bracket adherence: " + "; ".join(_msgs),
+                      flush=True)
+                _dbg_pins = []
+
+            if (continuity == "latent_handoff" and si > 0
+                    and last_tail is not None):
+                # replay fidelity: the locked span should re-diffuse the
+                # previous tail; a high mad means the lock is too weak (or
+                # the row mapping is off).
+                if handoff_depth == "block":
+                    _pt, _fo, _ks = last_tail[-17:], 5, (0, 8, 16)
+                else:
+                    _pt, _fo, _ks = last_tail[-5:], 0, (0, 2, 4)
+                _msgs = []
+                for _k in _ks:
+                    if _fo + _k < imgs.shape[0] and _k < _pt.shape[0]:
+                        _msgs.append("f%d mad %.4f" % (_fo + _k, float(
+                            (imgs[_fo + _k].detach().cpu().float()
+                             - _pt[_k].detach().cpu().float()).abs().mean())))
+                print("[H3Memory] handoff replay fidelity: "
+                      + "; ".join(_msgs), flush=True)
+                if _ho_wav_tail is not None:
+                    # audio replay fidelity + speech-onset check: the head
+                    # of this shot should be a replay of the previous tail;
+                    # a speech onset inside it means the trim will chop the
+                    # line's opening words (review-verified failure mode)
+                    _win = max(1, int(sr * 0.02))
+                    _n = min(_ho_wav_tail.shape[-1], wav.shape[-1])
+                    _ep = _aud_env(_ho_wav_tail[..., :_n].cpu(), _win)
+                    _en = _aud_env(wav[..., :_n].detach().cpu(), _win)
+                    _m = min(_ep.shape[0], _en.shape[0])
+                    _mad = float((_ep[:_m] - _en[:_m]).abs().mean())
+                    def _onset(e):
+                        idx = (e > 0.02).nonzero()
+                        return (float(idx[0]) * 0.02) if idx.numel() else -1.0
+                    print("[H3Memory] audio replay: env mad %.4f | speech "
+                          "onset prev-tail %.2fs vs new-head %.2fs"
+                          % (_mad, _onset(_ep[:_m]), _onset(_en[:_m])),
+                          flush=True)
+                    # the number that decides the join: first speech AFTER
+                    # the replay+guard span. < 1.33s means the model planned
+                    # speech under the lock and its opening was suppressed.
+                    _e2 = _aud_env(wav[..., :int(sr * 2.5)].detach().cpu(),
+                                   _win)
+                    _post = _e2[int(0.925 / 0.02):]
+                    _pi = (_post > 0.02).nonzero()
+                    _t2 = (0.925 + float(_pi[0]) * 0.02) if _pi.numel() \
+                        else -1.0
+                    print("[H3Memory] new-line onset %.2fs (guard ends "
+                          "1.33s, trim keeps from 0.88s) -> %s"
+                          % (_t2, "CLEAN" if (_t2 < 0 or _t2 >= 1.30)
+                             else "SUPPRESSED-START RISK"), flush=True)
+
+            if si == 0 and self_anchor_voice and voice_block is None:
+                # THE self-anchor: shot 1's own rendered voice becomes the
+                # reference for every later shot. The bank carries voice as
+                # part of a video_audio slot that keeps rolling; this pins
+                # the ORIGINAL performance and never moves. The decoded audio
+                # is already at the VAE's rate and stereo - just trim and
+                # encode.
+                _aw = wav[:1] if wav.ndim == 3 else wav.unsqueeze(0)[:1]
+                _alim = 15 * sr
+                if _aw.shape[-1] > _alim:
+                    _aw = _aw[..., :_alim]
+                _avz = audio_vae.encode(_aw.movedim(1, -1))
+                voice_block = {"kind": "audio", "ref_audio_t": _avz.shape[-1],
+                               "audio_latent": _avz}
+                print("[H3Memory] self-anchor: shot 1's voice (%.1fs) is now "
+                      "<Audio 1> for the remaining %d shot(s)."
+                      % (_aw.shape[-1] / sr, n - 1), flush=True)
+            # store this shot as a bank slot: centre clip + the audio under it
+            clip_imgs, clip_start = _jb_centre_clip(imgs, bank_clip_frames)
+            if bank_ref_noise > 0:
+                # noised-clean-condition for the bank: the texture ratchet
+                # rides reference clips exactly as it rode keyframes - the
+                # model copies its own "pristine" output and adds ~1.2x
+                # detail (worst on faces). A little seeded noise makes the
+                # clip read as capture, so texture is regenerated, not
+                # enhanced. The noised clip never reaches the final cut.
+                _gn = torch.Generator().manual_seed(shot_seed ^ 0xBA9C)
+                clip_imgs = (clip_imgs + bank_ref_noise * torch.randn(
+                    clip_imgs.shape, generator=_gn).to(
+                    clip_imgs.device, clip_imgs.dtype)).clamp(0, 1)
+            bank.add((clip_imgs.clone(),
+                      _jb_audio_window(wav, sr, clip_start,
+                                       clip_imgs.shape[0])))
+
+            # Upscale AFTER the bank has taken its clip: the bank must keep
+            # base-resolution reference clips or the conditioning payload -
+            # and the VRAM it costs - grows with output_scale for no gain.
+            # Downstream of the VAE, so unlike the old two-pass path this
+            # cannot leave the latent manifold. Frame COUNT is untouched, so
+            # every seam-trim index below still means what it meant.
+            imgs = _upscale_frames(imgs, output_scale, upscale_model,
+                                   "H3Memory")
+            if si == 0 and preview_first_shot:
+                # shot 1 as early as possible, so a bad take can be cancelled
+                # instead of waited out
+                _write_shot_mp4(imgs, wav, sr,
+                                "video/H3_FIRSTSHOT/firstshot",
+                                "FIRST-SHOT PREVIEW saved", "H3Memory")
+            if save_every_shot:
+                # before the seam trim, so consecutive files overlap ~1s - a
+                # chain that dies at the mux can still be joined by hand
+                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
+                                f"shot {si + 1}/{n} saved", "H3Memory")
+
+            _tail_n = _OV_HO if continuity == "latent_handoff" else _OV
+            last_tail = imgs[-max(_tail_n, 1):].clone()
+            if continuity == "latent_handoff":
+                _ho_wav_tail = wav[..., -int(round(sr * 0.925)):] \
+                    .detach().cpu().clone()
+                # onset guard: encode this shot's quietest 0.4s as room
+                # tone. Locked into the next shot's audio JUST PAST the
+                # trim point, it stops the model planning speech under the
+                # replay - a lock alone merely masks the plan, and the free
+                # region then resumes MID-WORD at the boundary
+                # (waveform-verified: onset 25ms after the trim, word
+                # truncated because its start was suppressed, not trimmed).
+                try:
+                    if not audio_lock:
+                        _ho_guard = None
+                        raise StopIteration
+                    _gw = max(1, int(sr * 0.02))
+                    _ge = _aud_env(wav.detach().cpu(), _gw)
+                    _gn = int(sr * 0.4)
+                    _k = max(1, _gn // _gw)
+                    if wav.shape[-1] > _gn and _ge.shape[0] > _k + 1:
+                        _cs = torch.cumsum(
+                            torch.cat([torch.zeros(1), _ge]), 0)
+                        _i = int((_cs[_k:] - _cs[:-_k]).argmin()) * _gw
+                        _seg = wav[..., _i:_i + _gn]
+                        _w3 = _seg if _seg.ndim == 3 else _seg.unsqueeze(0)
+                        _ho_guard = audio_vae.encode(
+                            _w3.movedim(1, -1)).detach().clone()
+                    else:
+                        _ho_guard = None
+                except StopIteration:
+                    pass
+                except Exception as _e:
+                    _ho_guard = None
+                    print("[H3Memory] onset guard skipped: %r" % (_e,),
+                          flush=True)
+
+            # join handling. seamless: 1 duplicated frame. seamless_tail: the
+            # next shot REGENERATES _OV frames that duplicate this tail - drop
+            # them hard, or crossfade them (join_blend) so any residual step
+            # is spread across the band instead of landing on one boundary.
+            if si > 0 and continuity == "context_pin" and _cp_trim > 0:
+                # the head is a regeneration of the previous shot's tail,
+                # there purely to carry motion/colour/sound - drop it whole
+                # (video frames + the exact matching audio span)
+                imgs = imgs[min(_cp_trim, imgs.shape[0] - 1):]
+                wav = wav[..., int(round(sr * _cp_trim / 24.0)):]
+            elif si > 0 and continuity in ("seamless", "first_frame",
+                                           "flf_chain"):
+                # frame 0 IS the previous last frame - drop the duplicate
+                # (audio via the quietest-gap cut so a head word survives)
+                imgs = imgs[1:]
+                wav = _smart_head_trim(wav, sr, int(round(sr / 24.0)))
+            elif si > 0 and continuity in ("seamless_tail", "latent_handoff"):
+                ov = min(_OV_HO if continuity == "latent_handoff" else _OV,
+                         imgs.shape[0] - 1)
+                if join_blend and frames_parts:
+                    prev = frames_parts[-1]
+                    band = min(ov, prev.shape[0])
+                    w = torch.linspace(1.0, 0.0, band).view(-1, 1, 1, 1)
+                    new_band = imgs[:band].cpu()
+                    blend = w * prev[-band:] + (1.0 - w) * new_band
+                    # grain guard: uncorrelated grain averages down in a
+                    # blend; re-inject it so the band has no grain dip
+                    hp = prev[-band:] - _cg_gauss(prev[-band:], 1.0)
+                    g_sigma = float(hp.std())
+                    gg = torch.Generator().manual_seed(shot_seed ^ 0xB1E0D)
+                    blend = blend + g_sigma * torch.sqrt(
+                        2.0 * w * (1.0 - w)) * torch.randn(
+                        blend.shape, generator=gg, dtype=blend.dtype)
+                    prev[-band:] = blend.clamp(0, 1)
+                imgs = imgs[ov:]
+                _xf = max(1, int(sr * 40 / 1000.0))
+                if (continuity == "latent_handoff"
+                        and (audio_lock or _spine is not None)):
+                    # Symmetric trim: the overlap audio is a locked REPLAY of
+                    # the previous tail - the real words already live in the
+                    # previous part's kept audio. Keeping the replay instead
+                    # put imperfect-replay audio under the previous video
+                    # tail, heard as the next shot starting BEFORE the video
+                    # cut and resyncing at the trim point. Drop it with the
+                    # replayed frames (weld-compensated) so any residual step
+                    # lands simultaneously with the video join.
+                    keep_from = int(round(sr * ov / 24.0)) - _xf
+                    if keep_from > 0:
+                        wav = wav[..., keep_from:]
+                else:
+                    # silent-join (audio free) and seamless_tail: the new
+                    # head's audio is genuine content - keep it in full and
+                    # trim the PREVIOUS tail instead. With the join scripted
+                    # into held silence, nothing generated is ever lost.
+                    # seamless_tail: the new head's audio is fresh content
+                    # (only video is bracket-pinned) and its opening words
+                    # live there - keep it intact and trim the PREVIOUS tail
+                    # instead, weld-compensated so A/V stay sample-locked.
+                    cut = int(round(sr * ov / 24.0)) - _xf
+                    if (audio_parts and cut > 0
+                            and audio_parts[-1].shape[-1] > cut):
+                        audio_parts[-1] = audio_parts[-1][..., :-cut]
+                        # micro fade-out on the trimmed tail: the cut can
+                        # land mid-phoneme and the 40ms weld lets a clipped
+                        # fragment tick through ("ree" at the join,
+                        # review-verified); 100ms to silence reads as a
+                        # natural decay instead
+                        _fn = min(int(sr * 0.10),
+                                  audio_parts[-1].shape[-1])
+                        if _fn > 8:
+                            _fade = (torch.linspace(1.0, 0.0, _fn) ** 0.5) \
+                                .to(audio_parts[-1].dtype)
+                            audio_parts[-1][..., -_fn:] = \
+                                audio_parts[-1][..., -_fn:] * _fade
+
+            if join_fx == "vhs_glitch" and si > 0 and frames_parts:
+                # dress the boundary: 2 tail frames of the previous part +
+                # 3 head frames of this one, plus the audio hiccup on both
+                # sides of the weld. Seeded per join for reproducibility.
+                _fx_seed = (seed ^ 0x7A9E) + si
+                _pt = frames_parts[-1]
+                _ptn = min(2, _pt.shape[0])
+                if _ptn:
+                    _pt[-_ptn:] = _vhs_glitch_frames(_pt[-_ptn:], _fx_seed)
+                _hn = min(3, imgs.shape[0])
+                if _hn:
+                    imgs[:_hn] = _vhs_glitch_frames(
+                        imgs[:_hn], _fx_seed + 1).to(imgs.device, imgs.dtype)
+                audio_parts[-1] = _vhs_glitch_audio(
+                    audio_parts[-1], sr, at_start=False, seed=_fx_seed)
+                wav = _vhs_glitch_audio(wav, sr, at_start=True,
+                                        seed=_fx_seed + 1)
+                print("[H3Memory] join %d dressed as VHS glitch" % si,
+                      flush=True)
+
+            frames_parts.append(imgs.cpu())
+            audio_parts.append((wav if wav.ndim == 3 else wav.unsqueeze(0)).cpu())
+
+        if color_level == "scene" and len(frames_parts) > 1:
+            # SCENE-WIDE match: ONE reference for the whole piece, applied
+            # once at the end. The per-shot mode matched each shot to a
+            # rolling "house" and still left a hard step at every join
+            # (measured 29% warmth, constant within each shot). Driving
+            # every shot to a single scene-wide median removes the step,
+            # because all shots are pulled to the same target rather than
+            # to each other.
+            # Reference: the BOUNDARY KEYFRAMES when we have them. They come
+            # from one continuous take, agree to a few percent, and are the
+            # colour each shot is supposed to arrive at - far better than a
+            # median of the generated shots, which is itself drifted.
+            if keyframe_images is not None:
+                _s_mu, _s_cov = _cc_stats(keyframe_images)
+                _src = "boundary keyframes"
+            else:
+                _s_mu, _s_cov = _cc_stats(torch.cat(
+                    [p[::max(1, p.shape[0] // 24)] for p in frames_parts],
+                    dim=0))
+                _src = "scene median"
+            _before = [float(_cc_stats(p)[0][0] / _cc_stats(p)[0][2]
+                             .clamp_min(1e-6)) for p in frames_parts]
+            for _i in range(len(frames_parts)):
+                # PER-FRAME: a per-shot gain cannot fix a shot with a warm
+                # head and a cool body - it scales the head too
+                frames_parts[_i] = _cc_apply_perframe(frames_parts[_i],
+                                                      _s_mu)
+            _after = [float(_cc_stats(p)[0][0] / _cc_stats(p)[0][2]
+                            .clamp_min(1e-6)) for p in frames_parts]
+            print("[H3Memory] scene colour match (per-frame, target = %s) "
+                  "| warmth before " % _src
+                  + "/".join("%.2f" % v for v in _before) + "  after "
+                  + "/".join("%.2f" % v for v in _after), flush=True)
+
+        # issue #12: batch the raw per-shot latents along dim 0. Shapes match
+        # when every shot shares one grid, which is the normal case; if a run
+        # ever mixes grids the batch is impossible, and saying so beats
+        # returning something that silently is not what it claims to be.
+        def _batch_latents(parts, what):
+            if not parts:
+                return {"samples": torch.zeros(0)}
+            shapes = {tuple(x.shape[1:]) for x in parts}
+            if len(shapes) > 1:
+                print(f"[H3Memory] {what}: shots do not share a grid "
+                      f"({sorted(shapes)}) - returning shot 1 only.",
+                      flush=True)
+                return {"samples": parts[0]}
+            return {"samples": torch.cat(parts, dim=0)}
+
+        _lat_v = _batch_latents(_lat_v_parts, "video_latents")
+        _lat_a = _batch_latents(_lat_a_parts, "audio_latents")
+        print("[H3Memory] latents out: video %s, audio %s, head_frames=%d "
+              "(UNTRIMMED - shots 2+ open with the replayed head)"
+              % (tuple(_lat_v["samples"].shape),
+                 tuple(_lat_a["samples"].shape) if _lat_a_parts else "none",
+                 _cp_trim), flush=True)
+
+        master = torch.cat(frames_parts, dim=0)
+        # always the short 40ms weld: a long crossfade CONSUMES its overlap,
+        # which shortened audio 375ms per join and walked lip sync off from
+        # shot 2 onward. The seamless_tail trim above pre-compensates 40ms.
+        waveform = _xfade_audio(audio_parts, sr, ms=40)
+        print(f"[H3Memory] done: {n} shots, {master.shape[0]} frames "
+              f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
+        return (master, {"waveform": waveform, "sample_rate": sr}, n,
+                _lat_v, _lat_a, int(_cp_trim))
+
+class H3OptionalImage:
+    """An on/off gate for an OPTIONAL image input.
+
+    A normal switch node cannot express "no image": both of its branches are
+    required, so turning I2V "off" ends up feeding a placeholder (usually a
+    black EmptyImage) into start_image - which is not text-to-video, it is
+    video that starts from a black frame.
+
+    This node passes the image through when enabled, and emits nothing (None)
+    when disabled, which is exactly what an optional input expects.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enabled": ("BOOLEAN", {
+                    "default": True, "label_on": "image ON",
+                    "label_off": "no image (T2V)",
+                    "tooltip": "Off = emits nothing, so the downstream optional "
+                               "input behaves as if it were unconnected."}),
+            },
+            "optional": {
+                "image": ("IMAGE", {"tooltip": "Image to pass through when enabled."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "gate"
+    CATEGORY = "utils/minimax"
+    DESCRIPTION = ("Pass an image through, or nothing at all. Use to toggle an "
+                   "optional input such as start_image (I2V) without feeding a "
+                   "placeholder frame.")
+
+    def gate(self, enabled, image=None):
+        if not enabled:
+            print("[H3OptionalImage] disabled - passing nothing (T2V).",
+                  flush=True)
+            return (None,)
+        if image is None:
+            print("[H3OptionalImage] enabled but no image connected - passing "
+                  "nothing.", flush=True)
+        return (image,)
+
+
+class H3InfiniteTakeSampler:
+    """ONE denoise trajectory over an arbitrary-length AV latent.
+
+    Temporal MultiDiffusion for MiniMax H3: the sampler integrates a single
+    full-length latent; the model only ever attends over one window at a
+    time inside predict_noise, and overlapping windows' predictions blend
+    with raised-cosine ramps. There are no shot boundaries anywhere in the
+    trajectory - no seams to fix - and VRAM stays constant in duration
+    because each model eval is one ordinary window.
+
+    Latent geometry: 2 bootstrap rows encode the first 5 frames, then 5
+    rows per 17-frame block. Mid-take windows are fed 2 rows of preceding
+    context in the bootstrap slots (their prediction for those rows is
+    discarded - weight 0), so every window looks like a normal clip to the
+    model. Audio (40 latent-fps) is windowed to the same global timeline.
+
+    The script carries one prompt per window; overlapping windows share
+    their overlap content, so per-window dialogue becomes one continuous
+    performance.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "clip": ("CLIP",),
+            "video_vae": ("VAE",),
+            "audio_vae": ("VAE",),
+            "script": ("STRING", {
+                "multiline": True, "default": "",
+                "tooltip": "JSON {\"prompts\": [...]} - ONE prompt per "
+                           "window (the node prints the window count and "
+                           "time spans if the count is wrong)."}),
+            "width": ("INT", {"default": 768, "min": 32, "max": 4096,
+                              "step": 32}),
+            "height": ("INT", {"default": 1344, "min": 32, "max": 4096,
+                               "step": 32}),
+            "total_frames": ("INT", {
+                "default": 719, "min": 39, "max": 3600, "step": 17,
+                "tooltip": "Total take length at 24 fps, snapped up to the "
+                           "17k+5 grid. 719 = ~30s, 1450 = ~60s. VRAM does "
+                           "NOT grow with this - only render time does."}),
+            "window_frames": ("INT", {
+                "default": 243, "min": 90, "max": 480, "step": 17,
+                "tooltip": "Frames per attention window (snapped to 17k+5). "
+                           "Stay inside the trained range (124-362); the "
+                           "model never sees more than this at once."}),
+            "overlap_frames": ("INT", {
+                "default": 34, "min": 17, "max": 170, "step": 17,
+                "tooltip": "Overlap between consecutive windows (multiples "
+                           "of 17). More overlap = stronger agreement, more "
+                           "compute."}),
+            "seed": ("INT", {"default": 0, "min": 0,
+                             "max": 0xffffffffffffffff}),
+            "steps": ("INT", {"default": 10, "min": 1, "max": 100}),
+            "sampler_name": (_sampler_names(), {
+                "default": "euler",
+                "tooltip": "euler-family only for this node: H3's audio "
+                           "velocity is chain-rule-scaled, so 'denoised' is "
+                           "not x0 for the audio stream - multistep/"
+                           "exponential samplers that extrapolate on it "
+                           "mis-integrate the audio."}),
+            "scheduler": (_scheduler_names(), {"default": "simple"}),
+            "activation_reserve_gb": ("FLOAT", {
+                "default": 8.0, "min": 2.0, "max": 22.0, "step": 0.5,
+                "tooltip": "Activation VRAM reserved for ONE window eval. "
+                           "This node pins its own reserve because the "
+                           "loader's auto-reserve sees TWO latent shapes "
+                           "here (full take at load, window per eval) and "
+                           "double-reserves, forcing the DiT to offload "
+                           "(render-verified on a 3090: 750s/it from a 93% "
+                           "offloaded model). 7-8 GB suits 768x1344/243f; "
+                           "raise only on OOM inside the model forward. "
+                           "NOTE: a progress step is one pass over ALL "
+                           "windows, so 0/N sits still for window_count x "
+                           "per-window time before the first tick - that is "
+                           "not a hang."}),
+        },
+        # OPTIONAL on purpose. A browser tab opened before this widget
+        # existed has no widget for it, so it serialises the node without
+        # one; as a REQUIRED input that fails validation until the page is
+        # reloaded. Optional inputs still render as widgets, and still
+        # append after every required widget, so slot order is unchanged.
+        # NEW WIDGETS APPEND LAST - inserting above shifts every saved
+        # workflow's values by one slot
+        "optional": {
+            "derive_length_from_script": ("BOOLEAN", {
+                "default": False, "label_on": "script sets the length",
+                "label_off": "total_frames sets the length",
+                "tooltip": "ON: count the prompts and compute total_frames "
+                           "from them (one prompt per window), ignoring the "
+                           "total_frames widget. Lets an LLM rewriter decide "
+                           "how long the piece is - write N shots, get N "
+                           "windows. OFF: total_frames rules and the script "
+                           "must contain exactly the matching number of "
+                           "prompts (the node prints the window time-spans "
+                           "if it does not)."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
+    RETURN_NAMES = ("frames", "audio", "windows")
+    FUNCTION = "run"
+    CATEGORY = "sampling/minimax"
+
+    def run(self, model, clip, video_vae, audio_vae, script, width, height,
+            total_frames, window_frames, overlap_frames, seed, steps,
+            sampler_name="euler", scheduler="simple",
+            derive_length_from_script=False, activation_reserve_gb=8.0):
+        import torch
+        import comfy.samplers as cs
+        import comfy.sampler_helpers as csh
+        import comfy.model_management as _mm
+        from comfy_extras import nodes_custom_sampler as ncs
+        from comfy_extras import nodes_minimax_h3 as mmh3
+        from comfy_extras.nodes_audio import vae_decode_audio
+
+        _sc = json.loads(script)
+        # accept the rewriter's key OR a bare list, so LLMEnhance output and
+        # its passthrough (raw JSON) mode both drop straight in
+        if isinstance(_sc, list):
+            prompts = [str(p) for p in _sc]
+        else:
+            prompts = [str(p) for p in (_sc.get("prompts")
+                                        or _sc.get("shots") or [])]
+        if not prompts:
+            raise ValueError(
+                "script contained no prompts. Expected {\"prompts\": [...]} "
+                "(also accepts {\"shots\": [...]} or a bare JSON list).")
+
+        # window geometry must be known before the length can be derived
+        wf = _jb_grid(window_frames)
+        Wb = (wf - 5) // 17
+        Ob = max(1, int(overlap_frames) // 17)
+        Sb = Wb - Ob
+        if Sb < 1:
+            raise ValueError("overlap must be smaller than the window")
+
+        if derive_length_from_script:
+            # the SCRIPT decides the runtime: one prompt per window, so
+            # N prompts need Sb*(N-1)+Wb blocks. Inverts the usual
+            # dependency and lets an LLM rewriter pick the length.
+            _n = len(prompts)
+            total_frames = 17 * (Sb * (_n - 1) + Wb) + 5
+            print("[H3Infinite] length derived from script: %d prompt(s) -> "
+                  "%d frames (%.1fs)"
+                  % (_n, total_frames, total_frames / 24.0), flush=True)
+
+        latent, F = mmh3._empty_av_latent(width, height, total_frames)
+        comps = latent["samples"].unbind()
+        v0, a0_t = comps[0], comps[1]
+        R, Ta = v0.shape[2], a0_t.shape[-1]
+        B_total = (F - 5) // 17
+        rows_w = 5 * Wb + 2
+        A_w = int(round((17 * Wb + 5) / 24.0 * 40.0))
+        c_skip = int(round(5 / 24.0 * 40.0))          # bootstrap audio span
+        n_ov_r = 5 * Ob                               # overlap rows
+        n_ov_a = int(round(17 * Ob / 24.0 * 40.0))    # overlap audio cols
+
+        starts = [0]
+        while starts[-1] + Wb < B_total:
+            # snap starts DOWN to multiples of 3 blocks: audio cols per
+            # block = 17/24*40 = 28.333, exact only at 3-block strides -
+            # an unsnapped start carries ~8ms A/V phase error into a band
+            # where its audio is averaged with a correctly phased
+            # neighbour. COVERAGE BEATS PHASE: the final clamped window
+            # must reach the end of the take even if its start cannot
+            # snap; it just gets the warning. Pick total_frames so that
+            # ((frames-5)/17 - Wb) % 3 == 0 to avoid it entirely.
+            nxt = starts[-1] + Sb
+            if nxt + Wb >= B_total:
+                nxt = B_total - Wb
+                if nxt % 3 != 0:
+                    print("[H3Infinite] final window start %d is not a "
+                          "multiple of 3 blocks: ~8ms A/V phase error in "
+                          "its overlap. Use a total_frames where "
+                          "((F-5)/17 - %d) %% 3 == 0 to avoid."
+                          % (nxt, Wb), flush=True)
+            else:
+                nxt = (nxt // 3) * 3
+            if nxt <= starts[-1]:
+                break
+            starts.append(nxt)
+        if len(prompts) == 1 and len(starts) > 1:
+            prompts = prompts * len(starts)
+        if len(prompts) != len(starts):
+            spans = ["window %d: %.1fs-%.1fs" % (
+                k, (17 * b) / 24.0, (17 * b + 17 * Wb + 5) / 24.0)
+                for k, b in enumerate(starts)]
+            raise ValueError(
+                "script has %d prompts but the take needs %d windows:\n%s"
+                % (len(prompts), len(starts), "\n".join(spans)))
+
+        wins = []
+        for k, b0 in enumerate(starts):
+            r0 = 0 if b0 == 0 else 5 * b0
+            ac0 = 0 if b0 == 0 else min(
+                int(round(17 * b0 / 24.0 * 40.0)), Ta - A_w)
+            wins.append({
+                "b0": b0, "r0": r0, "r1": r0 + rows_w,
+                "a0": ac0, "a1": ac0 + A_w,
+                "skip_r": 0 if b0 == 0 else 2,
+                "skip_a": 0 if b0 == 0 else c_skip,
+                "ramp_up": b0 != 0,
+                "ramp_dn": k != len(starts) - 1,
+            })
+
+        print("[H3Infinite] %d frames (~%.1fs) as %d windows of %d frames, "
+              "%d-frame overlap. VRAM = one window."
+              % (F, F / 24.0, len(starts), 17 * Wb + 5, 17 * Ob),
+              flush=True)
+
+        conds_raw = []
+        for p in prompts:
+            tokens = clip.tokenize(p)
+            conds_raw.append(clip.encode_from_tokens_scheduled(tokens))
+
+        # evict the TE unless it lives on its own device (all text encoding
+        # is done by this point; window conds are processed from tensors)
+        _te_dev = getattr(clip.patcher, "load_device", None)
+        _dit_dev = getattr(model, "load_device", None)
+        if not (_te_dev is not None and _dit_dev is not None
+                and str(_te_dev) != str(_dit_dev)):
+            try:
+                clip.patcher.model.to(_mm.text_encoder_offload_device())
+                _dev = _mm.get_torch_device()
+                _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                _mm.soft_empty_cache()
+                print("[H3Infinite] TE evicted; %.1f GB free for the DiT"
+                      % (_mm.get_free_memory(_dev) / (1024 ** 3)),
+                      flush=True)
+            except Exception:
+                pass
+
+        vws = (1, v0.shape[1], rows_w, v0.shape[3], v0.shape[4])
+        aws = (1, a0_t.shape[1], a0_t.shape[2], A_w)
+        Nv_w = vws[1] * vws[2] * vws[3] * vws[4]
+        Na_w = aws[1] * aws[2] * aws[3]
+        Nv = v0.shape[1] * R * v0.shape[3] * v0.shape[4]
+        Na = a0_t.shape[1] * a0_t.shape[2] * Ta
+
+        def _ramp(n, up, dtype):
+            t = torch.linspace(0, 1, max(2, n), dtype=dtype)
+            w = 0.5 * (1.0 - torch.cos(t * 3.14159265))
+            return w if up else (1.0 - w)
+
+        guider = ncs.BasicGuider().get_guider(model, conds_raw[0])[0]
+        _state = {"wconds": None}
+        _node_seed = seed
+
+        _orig_class_pn = type(guider).predict_noise
+
+        def _pn(x, timestep, model_options={}, seed=None):
+            if not (x.ndim == 3 and x.shape[1] == 1
+                    and x.shape[2] == Nv + Na):
+                # not the full AV pack (unexpected) - fall through untouched
+                return _orig_class_pn(guider, x, timestep,
+                                      model_options=model_options,
+                                      seed=seed)
+            dev, dt = x.device, x.dtype
+            if _state["wconds"] is None:
+                _state["wconds"] = []
+                dummy = torch.zeros((1, 1, Nv_w + Na_w), device=dev,
+                                    dtype=dt)
+                for c in conds_raw:
+                    d = {"positive": csh.convert_cond(c)}
+                    for kk in d:
+                        d[kk] = list(map(lambda a: a.copy(), d[kk]))
+                    d = cs.process_conds(
+                        guider.inner_model, dummy, d, dev, None, None,
+                        _node_seed, latent_shapes=[vws, aws])
+                    _state["wconds"].append(d)
+                print("[H3Infinite] %d window conds processed"
+                      % len(_state["wconds"]), flush=True)
+            xv = x[:, 0, :Nv].reshape((1,) + tuple(v0.shape[1:]))
+            xa = x[:, 0, Nv:].reshape((1,) + tuple(a0_t.shape[1:]))
+            acc_v = torch.zeros_like(xv)
+            acc_a = torch.zeros_like(xa)
+            wsum_v = torch.zeros((1, 1, R, 1, 1), device=dev, dtype=dt)
+            wsum_a = torch.zeros((1, 1, 1, Ta), device=dev, dtype=dt)
+            for k, w in enumerate(wins):
+                v_w = xv[:, :, w["r0"]:w["r1"]]
+                a_w = xa[..., w["a0"]:w["a1"]]
+                x_w = torch.cat([v_w.reshape(1, 1, -1),
+                                 a_w.reshape(1, 1, -1)], dim=-1)
+                d_w = cs.sampling_function(
+                    guider.inner_model, x_w, timestep, None,
+                    _state["wconds"][k]["positive"], 1.0,
+                    model_options=model_options, seed=seed)
+                dv = d_w[:, 0, :Nv_w].reshape((1,) + tuple(vws[1:]))
+                da = d_w[:, 0, Nv_w:].reshape((1,) + tuple(aws[1:]))
+                # row weights for this window's contribution
+                nr = rows_w - w["skip_r"]
+                wr = torch.ones(nr, device=dev, dtype=dt)
+                if w["ramp_up"]:
+                    wr[:n_ov_r] = _ramp(n_ov_r, True, dt).to(dev)
+                if w["ramp_dn"]:
+                    wr[-n_ov_r:] = torch.minimum(
+                        wr[-n_ov_r:], _ramp(n_ov_r, False, dt).to(dev))
+                g_r0 = w["r0"] + w["skip_r"]
+                wrv = wr.view(1, 1, nr, 1, 1)
+                acc_v[:, :, g_r0:w["r1"]] += dv[:, :, w["skip_r"]:] * wrv
+                wsum_v[:, :, g_r0:w["r1"]] += wrv
+                na = A_w - w["skip_a"]
+                wa = torch.ones(na, device=dev, dtype=dt)
+                if w["ramp_up"]:
+                    wa[:n_ov_a] = _ramp(n_ov_a, True, dt).to(dev)
+                if w["ramp_dn"]:
+                    wa[-n_ov_a:] = torch.minimum(
+                        wa[-n_ov_a:], _ramp(n_ov_a, False, dt).to(dev))
+                g_a0 = w["a0"] + w["skip_a"]
+                wav_ = wa.view(1, 1, 1, na)
+                acc_a[..., g_a0:w["a1"]] += da[..., w["skip_a"]:] * wav_
+                wsum_a[..., g_a0:w["a1"]] += wav_
+            out_v = acc_v / wsum_v.clamp_min(1e-4)
+            out_a = acc_a / wsum_a.clamp_min(1e-4)
+            return torch.cat([out_v.reshape(1, 1, -1),
+                              out_a.reshape(1, 1, -1)], dim=-1)
+
+        guider.predict_noise = _pn
+
+        sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps,
+                                                 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
+        noise = ncs.RandomNoise().get_noise(seed)[0]
+        # pin a stable window-sized activation reserve for the whole run:
+        # the loader's shape-keyed auto-reserve sees the full pack at load
+        # AND the window pack per eval, double-reserving and mis-attributing
+        # measurements. One fixed answer for every shape query, restored
+        # after sampling.
+        _res_bytes = int(float(activation_reserve_gb) * (1024 ** 3))
+        _orig_memreq = getattr(model.model, "memory_required", None)
+
+        def _win_reserve(input_shape, *a, **k):
+            return _res_bytes
+
+        model.model.memory_required = _win_reserve
+        print("[H3Infinite] activation reserve pinned at %.1f GB per "
+              "window eval" % float(activation_reserve_gb), flush=True)
+        try:
+            out, _d = ncs.SamplerCustomAdvanced().sample(
+                noise, guider, sampler, sigmas, latent)
+        finally:
+            if _orig_memreq is not None:
+                model.model.memory_required = _orig_memreq
+
+        lat = out["samples"]
+        a_lat = None
+        if getattr(lat, "is_nested", False):
+            _c = lat.unbind()
+            a_lat = _c[1] if len(_c) > 1 else None
+            lat = _c[0]
+
+        # chunked video decode with the same fake-bootstrap context trick,
+        # so decode VRAM stays constant in take length too
+        frames_out = []
+        db = max(2, Wb)
+        b = 0
+        while b < B_total:
+            take = min(db, B_total - b)
+            if b == 0:
+                seg = lat[:, :, :2 + 5 * take]
+            else:
+                # 2 rows of preceding context in the bootstrap slots, first
+                # 5 decoded frames dropped - same trick as the windows
+                seg = lat[:, :, 5 * b:5 * (b + take) + 2]
+            px = video_vae.decode(seg)
+            if px.ndim == 5:
+                px = px.reshape(-1, px.shape[-3], px.shape[-2],
+                                px.shape[-1])
+            frames_out.append(px if b == 0 else px[5:])
+            b += take
+        master = torch.cat([f.cpu() for f in frames_out], dim=0)
+
+        aud = vae_decode_audio(audio_vae, {"samples": a_lat})
+        print("[H3Infinite] done: %d frames (~%.1fs), %d windows."
+              % (master.shape[0], master.shape[0] / 24.0, len(starts)),
+              flush=True)
+        return (master, aud, len(starts))
+
+
+NODE_CLASS_MAPPINGS = {"H3ScriptSplit": H3ScriptSplit,
+                       "H3ModelLoaderAny": H3ModelLoaderAny,
+                       "H3ClipLoaderAny": H3ClipLoaderAny,
+                       "H3AudioTrimStart": H3AudioTrimStart,
+                       "H3MultishotSampler": H3MultishotSampler,
+                       "H3MultishotMemorySampler": H3MultishotMemorySampler,
+                       "H3InfiniteTakeSampler": H3InfiniteTakeSampler,
+                       "H3OptionalImage": H3OptionalImage}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "H3ScriptSplit": "H3 Shot List",
+    "H3ModelLoaderAny": "H3 Model Loader (safetensors + GGUF)",
+    "H3ClipLoaderAny": "H3 CLIP Loader (safetensors + GGUF)",
+    "H3AudioTrimStart": "H3 Audio Trim Start",
+    "H3MultishotSampler": "H3 Multishot Sampler (one node)",
+    "H3MultishotMemorySampler": "H3 Multishot Sampler + Memory (long form)",
+    "H3InfiniteTakeSampler": "H3 Infinite Take (one trajectory, any length)",
+    "H3OptionalImage": "H3 Optional Image (I2V on/off)"}

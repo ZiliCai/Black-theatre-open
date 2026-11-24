@@ -1,0 +1,17 @@
+[ERROR] `max_pixels` is part of PaddleOCRVLImageProcessorKwargs, but not documented. Make sure to add it to the docstring of the function in C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\transformers\models\paddleocr_vl\image_processing_paddleocr_vl.py.
+[ERROR] `min_pixels` is part of PaddleOCRVLImageProcessorKwargs, but not documented. Make sure to add it to the docstring of the function in C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\transformers\models\paddleocr_vl\image_processing_pil_paddleocr_vl.py.
+[ERROR] `max_pixels` is part of PaddleOCRVLImageProcessorKwargs, but not documented. Make sure to add it to the docstring of the function in C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\transformers\models\paddleocr_vl\image_processing_pil_paddleocr_vl.py.
+[ERROR] `min_pixels` is part of PaddleOCRVLImageProcessorKwargs, but not documented. Make sure to add it to the docstring of the function in C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\transformers\models\paddleocr_vl\image_processing_pil_paddleocr_vl.py.
+[ERROR] `max_pixels` is part of PaddleOCRVLImageProcessorKwargs, but not documented. Make sure to add it to the docstring of the function in C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\transformers\models\paddleocr_vl\image_processing_pil_paddleocr_vl.py.
+[comfyUI-llama-TE] Windows DLL search paths prepared: C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\torch\lib; C:\BlackBox\ComfyUI_windows_portable\python_embeded\Lib\site-packages\llama_cpp\lib
+[WARNING] Traceback (most recent call last):
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\nodes.py", line 2266, in load_custom_node
+    module_spec.loader.exec_module(module)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+  File "<frozen importlib._bootstrap_external>", line 1023, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "C:\BlackBox\ComfyUI_windows_portable\ComfyUI\custom_nodes\Nvidia_RTX_Nodes_ComfyUI\__init__.py", line 2, in <module>
+    import nvvfx
+ModuleNotFoundError: No module named 'nvvfx'
+
+[WARNING] Cannot import C:\BlackBox\ComfyUI_windows_portable\ComfyUI\custom_nodes\Nvidia_RTX_Nodes_ComfyUI module for custom nodes: No module named 'nvvfx'

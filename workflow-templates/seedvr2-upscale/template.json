@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 2,
+  "id": "seedvr2-upscale",
+  "name": "SeedVR2 超分放大",
+  "version": "1.0.0",
+  "kind": "upscale",
+  "family": "seedvr2",
+  "workflowFile": "workflow.api.json",
+  "workflowHash": "sha256:42dae763311aa5664924cb7f81ebf2cd64886d7ea6eb5136695eb787db47c5ac",
+  "defaults": { "quality": "1080p", "aspect": "any" },
+  "aspects": [{ "id": "any", "label": "跟原片一样", "w": 0, "h": 0 }],
+  "bindings": {
+    "video": { "node": "3", "input": "video" },
+    "seed": { "node": "5", "input": "seed" },
+    "resolution": { "node": "5", "input": "resolution" },
+    "batchSize": { "node": "5", "input": "batch_size" },
+    "overlap": { "node": "5", "input": "temporal_overlap" },
+    "blocksToSwap": { "node": "1", "input": "blocks_to_swap" },
+    "encodeTile": { "node": "2", "input": "encode_tile_size" },
+    "decodeTile": { "node": "2", "input": "decode_tile_size" }
+  },
+  "outputs": {
+    "videoPrefix": { "node": "6", "input": "filename_prefix" }
+  },
+  "resources": [
+    "SEEDVR2/seedvr2_ema_3b-Q8_0.gguf",
+    "SEEDVR2/ema_vae_fp16.safetensors"
+  ]
+}

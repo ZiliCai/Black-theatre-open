@@ -1,0 +1,34 @@
+[INFO] Prompt executed in 00:10:10
+[INFO] got prompt
+[ERROR] Failed to validate prompt for output 3:
+[ERROR] * QwenTE_ModelLoader 1:
+[ERROR]   - Required input is missing: 前N层专家上CPU
+[ERROR]   - Required input is missing: 上下文长度
+[ERROR]   - Required input is missing: 视觉投影mmproj
+[ERROR]   - Required input is missing: 启用思考
+[ERROR]   - Required input is missing: 模型系列
+[ERROR]   - Required input is missing: 主模型
+[ERROR]   - Required input is missing: Qwen3.8推理强度
+[ERROR]   - Required input is missing: MoE专家上CPU
+[ERROR]   - Required input is missing: GPU层数
+[ERROR]   - Required input is missing: 保留历史think
+[ERROR]   - Required input is missing: KV缓存V类型
+[ERROR]   - Required input is missing: KV缓存K类型
+[ERROR] * QwenTE_ImageInfer 2:
+[ERROR]   - Required input is missing: top_k
+[ERROR]   - Required input is missing: top_p
+[ERROR]   - Required input is missing: 生成后自动卸载模型
+[ERROR]   - Required input is missing: 输出think块
+[ERROR]   - Required input is missing: 最大生成token
+[ERROR]   - Required input is missing: 输入模式
+[ERROR]   - Required input is missing: 最大边长
+[ERROR]   - Required input is missing: 频率惩罚
+[ERROR]   - Required input is missing: 存在惩罚
+[ERROR]   - Required input is missing: 重复惩罚
+[ERROR]   - Required input is missing: 温度
+[ERROR]   - Required input is missing: 系统提示词
+[ERROR]   - Required input is missing: 最多帧数
+[ERROR]   - Required input is missing: seed
+[ERROR]   - Required input is missing: 提示词
+[ERROR] Output will be ignored
+[WARNING] invalid prompt: {'type': 'prompt_outputs_failed_validation', 'message': 'Prompt outputs failed validation', 'details': '', 'extra_info': {}}
