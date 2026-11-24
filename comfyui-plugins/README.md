@@ -14,10 +14,11 @@
 | ComfyUI-Dehypnotic | — | MIT | [Dehypnotic/ComfyUI-Dehypnotic](https://github.com/Dehypnotic/ComfyUI-Dehypnotic) | Ref2VA |
 | comfyui-kjnodes | 1.5.0 | GPL-3.0 | [kijai/ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) | 全部视频工作流 |
 | comfyui-videohelpersuite | 1.7.9 | GPL-3.0 | [Kosinkadink/ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite) | 文武双全、Ref2VA、超分 |
+| SelfLiftH3Sampler | — | 未声明 | 改自 [facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift)（H3 改版的原仓库已下线） | 文武双全（两个） |
 
-## 还缺的一个
+## 关于 SelfLiftH3Sampler
 
-**SelfLiftH3Sampler**（文武双全两个工作流要用）暂时没有收录：它改自 [facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift)，原仓库没有声明开源许可证，改版的仓库也已经下线。确认可以再分发之后再加进来。
+它改自 [facok/comfyui-SelfLift](https://github.com/facok/comfyui-SelfLift)，加入了 MiniMax H3 的支持。原仓库没有声明开源许可证，H3 改版的仓库也已经下线，这里保留的是作者发布时的原样副本，版权归原作者。如果原作者不希望在这里分发，请提 issue，我们会删除。
 
 ## ComfyUI 版本
 
