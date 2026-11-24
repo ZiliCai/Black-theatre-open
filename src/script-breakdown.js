@@ -166,8 +166,17 @@ const LIST_SYSTEM = `你是短剧的分镜师。把用户给的这一段剧本�
 - cast：这一镜画面里出现的人物卡代号，主要的在前，最后加这一镜地点的场景卡代号。只能用「素材卡」里的代号，最多 6 个；素材卡里没有的人或地方不写进 cast，在 description 里用文字描写。
 - continue：「接上一镜」会从上一镜最后几帧接着生成画面，只适合同一个机位、同一个景别、画面没有切的连续动作，这时写 true。只要换了景别（比如中景换近景）、换了机位、换了地点或跳了时间，一律写 false。正常剪辑里大多数镜头都是 false。`;
 
-function buildListMessages({ chunk, cards = [], style = '', episode = '', part = 1, parts = 1, before = [] }) {
+// How finely to cut, as the user picked it on the first page
+const GRANULARITY = {
+  fine: '拆细一点：一镜一个动作或一句台词，一般 3–6 秒。对话一来一回各拆成一镜，反应镜头单独成镜。',
+  normal: '正常：一般 4–10 秒，按上面的规则拆。',
+  coarse: '拆粗一点：一般 6–12 秒。同一个机位里连续发生的动作和几句对白合在一镜里（仍然最多三个动作），只在换地点、换时间或必须换机位时才切。',
+};
+const granularityOf = (value) => (Object.prototype.hasOwnProperty.call(GRANULARITY, value) ? value : 'normal');
+
+function buildListMessages({ chunk, cards = [], style = '', episode = '', part = 1, parts = 1, before = [], granularity = 'normal' }) {
   const user = [
+    `镜头粒度：${GRANULARITY[granularityOf(granularity)]}`,
     cards.length ? `素材卡（代号 | 类型 | 名字 | 外形）：\n${cards.map(cardLine).join('\n')}` : '素材卡：没有。',
     style ? `画风：${style}` : '',
     before.length ? `这一段前面的最后几镜（接着它们往下拆，不要重复）：\n${before.map((s) => `- ${s.title}：${clip(s.description, 120)}`).join('\n')}` : '',
@@ -365,7 +374,7 @@ function createScriptBreakdown({ getPaths, getCards = () => [], getStyle = () =>
         if (running.stop) throw new Error('已停止');
         progress(`拆第 ${episode.id.replace(/^E0*/, '')} 集的镜头${chunks.length > 1 ? `（${i + 1}/${chunks.length} 段）` : ''}`);
         const shots = await ask(
-          buildListMessages({ chunk: chunks[i], cards, style, episode: episode.id.replace(/^E0*/, ''), part: i + 1, parts: chunks.length, before: episode.shots.slice(-2) }),
+          buildListMessages({ chunk: chunks[i], cards, style, episode: episode.id.replace(/^E0*/, ''), part: i + 1, parts: chunks.length, before: episode.shots.slice(-2), granularity: state.granularity }),
           (raw) => parseList(raw, codes, episode.shots[episode.shots.length - 1] || null), '剧本拆分镜·镜头清单',
         );
         if (!episode.shots.length && shots[0]) shots[0].continue = false;
@@ -488,8 +497,8 @@ function createScriptBreakdown({ getPaths, getCards = () => [], getStyle = () =>
   return {
     load: () => withPaths((paths) => view(paths)),
 
-    // relPaths: the script documents, in reading order
-    start: (relPaths) => withPaths((paths) => {
+    // relPaths in reading order; granularity: 'fine' | 'normal' | 'coarse'
+    start: (relPaths, { granularity } = {}) => withPaths((paths) => {
       if (running) return { ok: false, message: '正在进行中，请等它做完或先停下' };
       const old = readState(paths.projectDir);
       if (old && ['review', 'writing', 'stopped'].includes(old.phase)) return { ok: false, message: '上一次的拆分还没处理完：先写完或放弃它' };
@@ -502,7 +511,7 @@ function createScriptBreakdown({ getPaths, getCards = () => [], getStyle = () =>
       if (!sources.length) return { ok: false, message: '先选要拆的剧本文档' };
       const chars = sources.reduce((n, s) => n + s.text.length, 0);
       if (chars > MAX_SCRIPT) return { ok: false, message: `剧本太长了（约 ${Math.round(chars / 10000)} 万字），一次最多 ${MAX_SCRIPT / 10000} 万字，请分几次拆` };
-      const state = { phase: 'planning', startedAt: now(), sources, style: '', cards: [], existing: [], episodes: [], progress: { done: 0, total: 0, label: '准备中' }, error: '' };
+      const state = { phase: 'planning', startedAt: now(), granularity: granularityOf(granularity), sources, style: '', cards: [], existing: [], episodes: [], progress: { done: 0, total: 0, label: '准备中' }, error: '' };
       save(paths, state);
       launch(paths, state, 'plan', runPlan);
       return view(paths, state);

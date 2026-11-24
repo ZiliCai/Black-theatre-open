@@ -966,7 +966,7 @@ function registerIpc() {
   ipcMain.handle('script-chat:clear', () => scriptChat.clear());
   // ---------- a whole script into shots ----------
   ipcMain.handle('breakdown:load', () => scriptBreakdown.load());
-  ipcMain.handle('breakdown:start', (_e, { relPaths } = {}) => scriptBreakdown.start(relPaths));
+  ipcMain.handle('breakdown:start', (_e, { relPaths, granularity } = {}) => scriptBreakdown.start(relPaths, { granularity }));
   ipcMain.handle('breakdown:update', (_e, { plan } = {}) => scriptBreakdown.update(plan));
   ipcMain.handle('breakdown:write', () => scriptBreakdown.write());
   ipcMain.handle('breakdown:stop', () => scriptBreakdown.stop());

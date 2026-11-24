@@ -121,3 +121,5 @@
 .bd-list { padding-left: 1.4em; font-size: var(--fs-sm); line-height: 1.8; color: var(--sub); }
 .bd-next { border: 1px solid var(--line); border-radius: var(--r2); padding: var(--s3); background: var(--bg); font-size: var(--fs-sm); line-height: 1.8; }
 .bd-next a { color: var(--acc); cursor: pointer; text-decoration: underline dotted; }
+.bd-grain { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+.bd-dim .c-icon, .bd-dim svg { vertical-align: -2px; }

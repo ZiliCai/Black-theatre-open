@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, type Breakdown as View, type BreakdownCard, type BreakdownPlan, type BreakdownShot } from '../../api';
-import { Button, Icon, Modal, TextArea, TextInput, useToast } from '../../components';
+import { api, type Breakdown as View, type BreakdownCard, type BreakdownPlan, type BreakdownShot, type Granularity } from '../../api';
+import { Button, Icon, Modal, Segmented, TextArea, TextInput, useToast } from '../../components';
 import { useDialog } from '../../components/dialog';
 import { useApp } from '../../shell/context';
 
@@ -9,6 +9,26 @@ const minutes = (sec: number) => (sec >= 60 ? `${Math.floor(sec / 60)} 分 ${Mat
 const epName = (id: string) => `第 ${id.replace(/^E0*/i, '')} 集`;
 const looksLikeScript = (name: string) => /剧本|正文|台本|全集|script/i.test(name);
 const blankShot = (): BreakdownShot => ({ title: '新镜头', duration: 6, description: '', cast: [], continue: false });
+const MAX_SECONDS = 15;
+const MAX_CAST = 6;
+const GRAINS: { value: Granularity; label: string; hint: string }[] = [
+  { value: 'fine', label: '拆细一点', hint: '一镜一个动作或一句台词，3–6 秒，镜头多' },
+  { value: 'normal', label: '正常', hint: '一般 4–10 秒' },
+  { value: 'coarse', label: '拆粗一点', hint: '同一机位的动作和几句对白合成一镜，6–12 秒，镜头少' },
+];
+
+// A shot and the one after it as one: the first's title and continuation, both descriptions, everyone in either
+// (people first, places last), the lengths added up to the most a shot can be.
+function mergeShots(a: BreakdownShot, b: BreakdownShot, isPlace: (code: string) => boolean): BreakdownShot {
+  const both = [...new Set([...a.cast, ...b.cast])];
+  return {
+    title: a.title,
+    duration: Math.min(MAX_SECONDS, (Number(a.duration) || 0) + (Number(b.duration) || 0)),
+    description: [a.description, b.description].map((t) => t.trim()).filter(Boolean).join(' '),
+    cast: [...both.filter((c) => !isPlace(c)), ...both.filter(isPlace)].slice(0, MAX_CAST),
+    continue: a.continue,
+  };
+}
 
 // A whole script into shots: pick the script documents → the AI lists the people, places and shots → the user
 // fixes the list → the prompts are written and the shot documents made. The work runs in the main process; this
@@ -22,6 +42,7 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
   const [plan, setPlan] = useState<BreakdownPlan | null>(null);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [grain, setGrain] = useState<Granularity>('normal');
 
   const took = useCallback((r: View) => {
     if (!r.ok) { toast(r.message || '没成功', { tone: 'bad' }); return false; }
@@ -59,6 +80,14 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
 
   const allCards = useMemo(() => [...(state?.existing || []), ...(plan?.cards || state?.cards || [])], [state, plan]);
   const nameOf = useMemo(() => new Map(allCards.map((c) => [c.code, c.name])), [allCards]);
+  const places = useMemo(() => new Set(allCards.filter((c) => c.kind === 'scene').map((c) => c.code)), [allCards]);
+  const merge = (e: number, i: number) => {
+    const shots = plan?.episodes[e]?.shots;
+    if (!shots || !shots[i + 1]) return;
+    const sum = (Number(shots[i].duration) || 0) + (Number(shots[i + 1].duration) || 0);
+    editShots(e, (list) => [...list.slice(0, i), mergeShots(list[i], list[i + 1], (c) => places.has(c)), ...list.slice(i + 2)]);
+    if (sum > MAX_SECONDS) toast(`合起来 ${sum} 秒，一镜最长 ${MAX_SECONDS} 秒，时长按 ${MAX_SECONDS} 秒算；剧情太多的话写提示词时会删掉次要的动作`, { tone: 'bad' });
+  };
 
   const edit = (next: BreakdownPlan) => { setPlan(next); setDirty(true); };
   const editShot = (e: number, s: number, change: Partial<BreakdownShot>) => {
@@ -87,7 +116,7 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
     try { return took(await fn()); } finally { setBusy(false); }
   };
 
-  const start = () => act(() => api.startBreakdown({ relPaths: chosen }));
+  const start = () => act(() => api.startBreakdown({ relPaths: chosen, granularity: grain }));
   const discard = async (ask: string) => {
     if (ask && !(await confirm({ title: '放弃这次拆分', message: ask, okLabel: '放弃', danger: true }))) return;
     if (await act(() => api.discardBreakdown())) { setPicks(null); setPlan(null); setDirty(false); }
@@ -136,6 +165,11 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
             </label>
           )) : <p className="bd-dim">项目里还没有文档。先在左边「新建文档」，把剧本贴进去。</p>}
         </div>
+        <div className="bd-section">镜头粒度</div>
+        <div className="bd-grain">
+          <Segmented id="bd-grain" value={grain} onChange={setGrain} options={GRAINS.map(({ value, label }) => ({ value, label }))} />
+          <span className="bd-dim">{GRAINS.find((g) => g.value === grain)?.hint}</span>
+        </div>
         <p className={over ? 'bd-bad' : 'bd-dim'}>已选 {wan(chosenChars)}{over ? `，超过了一次最多 ${wan(view.limit)}，请分几次拆` : ''}。剧本里写了「第一集」「第2集」「EP03」这样的标题，会按集拆开。</p>
       </>
     );
@@ -171,7 +205,7 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
   } else if (phase === 'review' && plan) {
     body = (
       <>
-        <p className="bd-dim">共 {plan.episodes.length} 集、{total} 个镜头，剧本时长约 {minutes(seconds)}。改完点「写提示词」；改动随时可以先保存。</p>
+        <p className="bd-dim">共 {plan.episodes.length} 集、{total} 个镜头，剧本时长约 {minutes(seconds)}。每镜右边：<Icon name="plus" size={12} /> 在后面加一镜，<Icon name="link" size={12} /> 和下一镜合并，<Icon name="trash" size={12} /> 删掉。改完点「写提示词」；改动随时可以先保存。</p>
         <div className="bd-section">画风</div>
         <TextInput value={plan.style} placeholder="比如：写实电影质感，自然光，色彩克制" onChange={(e) => edit({ ...plan, style: e.target.value })} />
         <div className="bd-section">人物和场景 <span className="bd-dim">（代号是镜头挂参考图用的；之后在素材页给每张卡出图）</span></div>
@@ -216,6 +250,7 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
                 </div>
                 <div className="tools">
                   <Button size="sm" variant="ghost" title="在后面加一镜" onClick={() => editShots(e, (shots) => [...shots.slice(0, i + 1), blankShot(), ...shots.slice(i + 1)])}><Icon name="plus" /></Button>
+                  <Button size="sm" variant="ghost" className="bd-merge" title="和下一镜合并成一镜" disabled={i === ep.shots.length - 1} onClick={() => merge(e, i)}><Icon name="link" /></Button>
                   <Button size="sm" variant="ghost" title="删掉这一镜" onClick={() => editShots(e, (shots) => shots.filter((_, j) => j !== i))}><Icon name="trash" /></Button>
                 </div>
               </div>

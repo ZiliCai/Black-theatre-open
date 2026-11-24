@@ -90,6 +90,13 @@ test('a shot whose framing changes cannot continue the one before', () => {
   assert.equal(B.fixContinuity([{ description: '远景，洞口。', continue: true }], { description: '近景，她。' })[0].continue, false);
 });
 
+test('the granularity picked on the first page reaches the shot list request', () => {
+  assert.match(B.buildListMessages({ chunk: 'x', granularity: 'coarse' }).user, /拆粗一点/);
+  assert.match(B.buildListMessages({ chunk: 'x', granularity: 'fine' }).user, /拆细一点/);
+  assert.match(B.buildListMessages({ chunk: 'x', granularity: 'whatever' }).user, /镜头粒度：正常/);
+  assert.match(B.buildListMessages({ chunk: 'x' }).user, /镜头粒度：正常/);
+});
+
 test('a reply without the list is an error', () => {
   assert.throws(() => B.parseList('好的，我来拆', new Set()), /JSON/);
   assert.throws(() => B.parseList('{"shots":[]}', new Set()), /空/);
@@ -170,8 +177,9 @@ test('plan, review and write: the shot page and the asset page find what was wri
   const svc = B.createScriptBreakdown({ getPaths: () => paths, llm: fakeLlm(calls), compose: fakeCompose(seen) });
 
   assert.ok(svc.load().docs.some((d) => d.relPath === '剧本.md'));
-  const started = svc.start(['剧本.md']);
+  const started = svc.start(['剧本.md'], { granularity: 'coarse' });
   assert.equal(started.ok, true, started.message);
+  assert.equal(started.state.granularity, 'coarse');
   let v = await settle(svc);
   assert.equal(v.state.phase, 'review', v.state.error);
   assert.deepEqual(v.state.episodes.map((e) => e.id), ['E02', 'E03']);

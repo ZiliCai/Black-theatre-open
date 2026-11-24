@@ -172,9 +172,11 @@ function fakeLlm() {
           return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(cast) } }] }));
         }
         if (body.includes('短剧的分镜师')) {
+          if (!body.includes('拆粗一点')) return res.end(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
           const list = { shots: [
-            { title: '老周进隧道', duration: 5, description: '远景，老周提着检修灯走进隧道。', cast: ['LZ', 'S-SD'], continue: false },
-            { title: '看见铁门', duration: 6, description: '中景，老周停下，说「这门怎么开了」。', cast: ['LZ', 'S-SD'], continue: true },
+            { title: '老周进隧道', duration: 5, description: '远景，老周提着检修灯走进隧道。', cast: ['S-SD', 'LZ'], continue: false },
+            { title: '往深处走', duration: 4, description: '远景，老周往隧道深处走。', cast: ['LZ'], continue: true },
+            { title: '看见铁门', duration: 6, description: '远景，老周停下，说「这门怎么开了」。', cast: ['LZ', 'S-SD'], continue: true },
           ] };
           return res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(list) } }] }));
         }
@@ -635,8 +637,12 @@ async function runSmoke(h) {
     await waitFor("!!document.getElementById('btn-bd-start')", 5000, 'the breakdown dialog');
     await js("[...document.querySelectorAll('#breakdown .bd-docs label')].find((l) => l.textContent.includes('01_世界观')).querySelector('input').click()");
     await shot('breakdown-pick');
+    await click('#bd-grain [data-value="coarse"]');
     await click('#btn-bd-start');
-    await waitFor("!!document.getElementById('btn-bd-write') && document.querySelectorAll('#breakdown .bd-shot').length === 2", 10000, 'the shot list to review');
+    await waitFor("!!document.getElementById('btn-bd-write') && document.querySelectorAll('#breakdown .bd-shot').length === 3", 10000, 'the shot list to review');
+    // the first two shots made one: both descriptions, both lengths, the person before the place
+    await click('#breakdown .bd-shot .bd-merge');
+    await waitFor("document.querySelectorAll('#breakdown .bd-shot').length === 2", 3000, 'two shots merged into one');
     await shot('breakdown-review');
     await click('#btn-bd-write');
     await waitFor("!!document.querySelector('#dialog [data-choice=\"ok\"]')", 3000, 'the question before writing');
@@ -647,6 +653,9 @@ async function runSmoke(h) {
     const split = fs.existsSync(splitDoc) ? fs.readFileSync(splitDoc, 'utf8') : '';
     if (!split.includes('## MOTION-E02-002 · 看见铁门') || !split.includes('> subject_definitions:') || !split.includes('- 接续上一镜：是')) return fail(`the split episode document is not what the shot page reads:\n${split}`);
     if (!fs.readFileSync(path.join(projectDir, '剧本', '人物与场景（AI 拆分）.md'), 'utf8').includes('| LZ | 老周 |')) return fail('the new cards did not reach their list');
+    if (!split.includes('- 时长：') || !split.includes('- 剧情：远景，老周提着检修灯走进隧道。 远景，老周往隧道深处走。')) return fail(`the merged shot is not in the episode document:\n${split}`);
+    const splitPlan = JSON.parse(fs.readFileSync(path.join(projectDir, '.blackbox', 'breakdown.json'), 'utf8'));
+    if (splitPlan.granularity !== 'coarse' || splitPlan.episodes[0].shots[0].cast.join() !== 'LZ,S-SD') return fail(`the plan lost the granularity or the merged cast order: ${splitPlan.granularity} ${splitPlan.episodes[0].shots[0].cast}`);
     await js("[...document.querySelectorAll('#breakdown footer button')].find((b) => b.textContent.includes('清除')).click()");
     await waitFor("!!document.getElementById('btn-bd-start')", 5000, 'the breakdown cleared');
     await js("[...document.querySelectorAll('#breakdown footer button')].find((b) => b.textContent === '取消').click()");
