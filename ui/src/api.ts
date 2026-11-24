@@ -137,6 +137,7 @@ export type RemoteServer = {
   comfyPort: number; startCommand: string; modelSwaps: Record<string, string>;
 };
 export type Tunnel = { state: 'off' | 'connecting' | 'open' | 'down'; kind: string; message: string; port: number | null; serverId: string; since: number };
+export type SetupState = { status: 'idle' | 'running' | 'ready' | 'done' | 'failed'; message: string; gpu?: string; space?: string; preview?: string };
 export type RemotePayload = { ok: true; target: string; servers: RemoteServer[]; tunnel: Tunnel };
 export type ServerTest = { ok: boolean; message?: string; steps: { label: string; ok: boolean; detail: string }[] };
 export type Alert = { title: string; sub: string; count?: number } | null;
@@ -155,6 +156,8 @@ type Bridge = {
   llmUsage: Fn<void, LlmUsage>; setLlmPrices: Fn<LlmPrices | null, { ok: boolean; message?: string; prices?: LlmPrices }>;
   start: Fn<void, Result>; stop: Fn<void, Result>; restart: Fn<void, Result>; clearCache: Fn<void, Result>;
   openUI: Fn<void, void>; openLog: Fn<void, void>;
+  autodlStart: Fn<{ id: string; profile: string; upscale: boolean }, Result>;
+  autodlStatus: Fn<{ id: string }, SetupState>;
   remoteGet: Fn<void, RemotePayload>; remoteSave: Fn<RemoteServer, (RemotePayload & { saved: string }) | { ok: false; message: string }>;
   remoteDelete: Fn<{ id: string }, RemotePayload | { ok: false; message: string }>;
   remoteUse: Fn<{ id: string }, RemotePayload | { ok: false; message: string }>;
@@ -246,5 +249,5 @@ export const api: Bridge = window.launcher;
 
 // media:// URLs: 'project' serves the active project's output folder, 'local' the folder the 成片 page browses,
 // 'workflow' the output folder used for reference pictures.
-export const mediaUrl = (host: 'project' | 'local' | 'workflow', relPath: string) =>
+export const mediaUrl = (host: 'project' | 'local' | 'workflow' | 'autodl', relPath: string) =>
   `media://${host}/${relPath.split('/').map(encodeURIComponent).join('/')}`;

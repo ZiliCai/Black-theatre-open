@@ -2,7 +2,7 @@
 
 用 AI 做短剧的 Windows 桌面软件：写剧本、做人物和场景素材、按镜头出视频、挑片、连起来看。出片用的是 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 加 MiniMax H3 视频模型，可以在本机显卡上跑，也可以放到租的云 GPU（比如 AutoDL）上跑。
 
-> 项目还在整理成“小白也能用”的版本：一键安装、模型一键下载、AutoDL 一键配置正在开发中。现在需要自己装好 ComfyUI 和模型。
+> Windows 桌面端目前从源码启动。AutoDL 用户可以在软件里安装云端环境和模型，完成后会收到一份真实生成的验收素材。
 
 ## 能做什么
 
@@ -21,10 +21,12 @@
 - 出片的地方二选一：
   - **本机**：NVIDIA 显卡，建议 16GB 显存以上，硬盘留 100GB；
   - **远程**：一台租的云 GPU（建议 RTX 4090 24GB），本机只运行软件。
-- [ComfyUI 便携版](https://github.com/comfyanonymous/ComfyUI/releases) v0.37.0
+- 本机出片需要 [ComfyUI 便携版](https://github.com/comfyanonymous/ComfyUI/releases) v0.37.0
 - [Node.js](https://nodejs.org/) 20 以上（从源码运行时需要）
 
 ## 安装
+
+使用 AutoDL 时，只需在 Windows 完成第 3 步，再按[云端配置说明](docs/AutoDL配置.md)操作。本机出片按下面三步安装。
 
 1. **ComfyUI 插件**：把 [`comfyui-plugins/`](comfyui-plugins/) 下的插件文件夹复制到 ComfyUI 的 `custom_nodes/`，详见那里的说明。
 2. **模型**：按 [docs/模型下载.md](docs/模型下载.md) 下载，放到 ComfyUI 的 `models/` 下对应的位置。
@@ -35,7 +37,7 @@
    npm run build
    ```
 
-   之后双击 `启动器.bat` 打开。第一次打开后，在 设置 → 常规 里选择 ComfyUI 便携版文件夹。
+   之后双击 `启动器.bat` 打开。本机出片时，在 设置 → 常规 里选择 ComfyUI 便携版文件夹。
 
 ## 工作流
 

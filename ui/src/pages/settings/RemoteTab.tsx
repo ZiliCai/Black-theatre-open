@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, type RemotePayload, type RemoteServer, type ServerTest } from '../../api';
 import { Button, Field, Icon, TextArea, TextInput, useToast } from '../../components';
 import { useDialog } from '../../components/dialog';
+import { AutoDLSetup } from './AutoDLSetup';
 import { useApp } from '../../shell/context';
 
 const BLANK: RemoteServer = {
@@ -106,6 +107,7 @@ export function RemoteTab() {
                 setData(r);
               }}>删除</Button>
             </div>
+            {active && <AutoDLSetup key={JSON.stringify([s.id, s.host, s.port, s.user, s.comfyPort])} server={s} />}
           </article>
         );
       })}

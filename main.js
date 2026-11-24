@@ -43,6 +43,8 @@ const { createUpscaleService, createUpscaleStore } = require('./src/upscale');
 const { createTakeStore } = require('./src/take-store');
 const { createAssetService } = require('./src/asset-service');
 const { createAssetStore } = require('./src/asset-store');
+const autodl = require('./src/autodl-setup');
+const setupPreviews = () => path.join(app.getPath('userData'), 'autodl-previews');
 const { createRemoteTarget, testServer } = require('./src/remote-target');
 const { normalizeServer, validateServer } = require('./src/remote-servers');
 const fmt = require('./renderer/format');
@@ -449,7 +451,7 @@ async function serveMedia(request) {
   } catch {
     rel = '';
   }
-  const root = host === 'workflow' ? workflowMediaRoot : host === 'project' ? (shotProject() || {}).outputDir : galleryRoot;
+  const root = host === 'autodl' ? setupPreviews() : host === 'workflow' ? workflowMediaRoot : host === 'project' ? (shotProject() || {}).outputDir : galleryRoot;
   const abs = root && kindOf(rel) ? resolveInside(root, rel) : null;
   if (!abs) return new Response('forbidden', { status: 403 });
   let size;
@@ -632,6 +634,43 @@ function registerIpc() {
     pollStatus();
     return remotePayload();
   };
+  const selectedServer = (id) => {
+    const server = remoteTarget.server();
+    if (!server || server.id !== id) throw new Error('请先在这台服务器上选择「在这台上出片」');
+    return server;
+  };
+  ipcMain.handle('autodl:start', async (_e, { id, profile, upscale } = {}) => {
+    try {
+      const server = selectedServer(id);
+      const busy = queueBlocksSwitch();
+      if (busy) return busy;
+      await autodl.launch(server, __dirname, { profile, upscale: upscale === true });
+      return { ok: true };
+    } catch (error) { return { ok: false, message: error.message }; }
+  });
+  ipcMain.handle('autodl:status', async (_e, { id } = {}) => {
+    const server = selectedServer(id);
+    const sameServer = () => {
+      const now = remoteTarget.server();
+      return now && ['id', 'user', 'host', 'port', 'comfyPort'].every((k) => now[k] === server[k]);
+    };
+    const s = await autodl.status(server);
+    if (s.status !== 'ready') return { status: s.status, message: s.message, gpu: s.gpu, space: s.space };
+    if (!sameServer()) throw new Error('出片服务器已切换');
+    const preview = await autodl.collect(s, remoteTarget.port(), setupPreviews());
+    if (!sameServer()) throw new Error('出片服务器已切换');
+    const current = remoteTarget.server();
+    const dir = autodl.remoteDir(current.comfyPort);
+    const startCommand = current.startCommand || (s.managed ? dir + '/venv/bin/python ' + dir + '/service.py ' + current.comfyPort : '');
+    const modelSwaps = { ...current.modelSwaps };
+    const fp4 = 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors';
+    const int8 = 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors';
+    if (s.swaps?.[fp4] === int8 && !modelSwaps[fp4]) modelSwaps[fp4] = int8;
+    if (startCommand !== current.startCommand || JSON.stringify(modelSwaps) !== JSON.stringify(current.modelSwaps)) {
+      saveRemote({ servers: config.servers.map((p) => p.id === id ? { ...p, startCommand, modelSwaps } : p) });
+    }
+    return { status: 'done', message: '配置完成，验收文件已取回本机并通过校验。', gpu: s.gpu, space: s.space, preview };
+  });
   ipcMain.handle('remote:get', () => remotePayload());
   ipcMain.handle('remote:save', (_e, raw) => {
     const server = normalizeServer(raw || {});

@@ -157,16 +157,20 @@ function createTunnel({
 }
 
 // Runs one command on the server. Never rejects: { ok, code, stdout, stderr, kind, message }.
-function runRemote(server, command, { spawn = realSpawn, timeoutMs = 30000 } = {}) {
+function runRemote(server, command, { spawn = realSpawn, timeoutMs = 30000, input = null } = {}) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let proc;
     try {
-      proc = spawn('ssh', commandArgs(server, command), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      proc = spawn('ssh', commandArgs(server, command), { windowsHide: true, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     } catch (e) {
       resolve({ ok: false, code: null, stdout, stderr: e.message, ...explainSsh(e.message) });
       return;
+    }
+    if (input !== null) {
+      proc.stdin.on('error', () => {}); // SSH reports an early remote exit on stderr.
+      proc.stdin.end(input);
     }
     const timer = setTimeout(() => { stderr += '\nConnection timed out'; try { proc.kill(); } catch { /* gone */ } }, timeoutMs);
     proc.stdout.on('data', (c) => { stdout += c.toString(); });
