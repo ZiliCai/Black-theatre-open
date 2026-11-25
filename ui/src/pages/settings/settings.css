@@ -111,3 +111,7 @@
 .check-result { min-width: 3em; color: var(--sub); }
 .check-result.pass { color: var(--good); }
 .check-result.fail { color: var(--bad); }
+/* What the cloud installer is fetching right now, so a slow mirror does not look frozen. */
+.setup-activity { display: grid; gap: 2px; padding: var(--s2) var(--s3); border-radius: var(--r2); background: var(--bg);
+  font-size: var(--fs-sm); word-break: break-all; }
+.setup-elapsed { margin: 0; font-size: var(--fs-sm); }

@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +33,11 @@ class ModelInstallTest(unittest.TestCase):
         content = self.content
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
+                if not self.headers['Range']:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(content)
+                    return
                 interval = self.headers['Range'][6:]
                 start, end = map(int, interval.split('-'))
                 seen.append(start)
@@ -74,6 +80,15 @@ class ModelInstallTest(unittest.TestCase):
         with patch.object(ranges, 'transfer', flaky), patch.object(models, 'PAUSES', (0.01,)):
             models.download(dest, self.spec, lambda _: None)
         self.assertEqual(len(calls), 2)
+        self.assertEqual(dest.read_bytes(), self.content)
+
+    def test_small_file_waits_out_a_network_outage(self):
+        url, _ = self.server()
+        dest = self.root / 'preview.bin'
+        self.spec['urls'] = ['http://127.0.0.1:9/unreachable']
+        with patch.object(ranges, 'CHUNK', 1 << 30), patch.object(models, 'PAUSES', (0.01,)), \
+                patch.object(models.time, 'sleep', lambda _: self.spec.update(urls=[url])):
+            models.download(dest, self.spec, lambda _: None)
         self.assertEqual(dest.read_bytes(), self.content)
 
     def test_failed_sources_preserve_sparse_resume_map(self):
@@ -212,3 +227,63 @@ class ModelsOnlyRunTest(unittest.TestCase):
         with patch.object(setup.subprocess, 'check_output', side_effect=FileNotFoundError):
             with self.assertRaisesRegex(RuntimeError, '无卡模式'):
                 self.run_setup()
+
+
+@unittest.skipIf(setup is None, 'the AutoDL worker needs fcntl')
+class PipRetryTest(unittest.TestCase):
+    def test_pip_goes_round_again_after_a_mirror_timeout(self):
+        calls = []
+        def flaky(args):
+            calls.append(args)
+            if len(calls) < 3:
+                raise setup.subprocess.CalledProcessError(2, args)
+        with patch.object(setup, 'run', flaky), patch.object(setup, 'PIP_PAUSES', (0, 0, 0)):
+            setup.pip_install(['py', '-m', 'pip', 'install', '-r', 'req.txt'])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0][:8], ['py', '-m', 'pip', 'install', '--timeout', '60', '--retries', '10'])
+
+    def test_pip_gives_up_after_the_last_round(self):
+        def down(args):
+            raise setup.subprocess.CalledProcessError(2, args)
+        with patch.object(setup, 'run', down), patch.object(setup, 'PIP_PAUSES', (0,)):
+            with self.assertRaises(setup.subprocess.CalledProcessError):
+                setup.pip_install(['py', '-m', 'pip', 'install', 'x'])
+
+
+@unittest.skipIf(setup is None, 'the AutoDL worker needs fcntl')
+class InstallActivityTest(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name)
+
+    def test_reads_what_pip_is_fetching(self):
+        log = self.root / 'setup.log'
+        log.write_text('Collecting einops\n  Downloading http://mirrors.aliyun.com/pypi/packages/c2/be/x/'
+                       'opencv_python_headless-5.1.0.95-cp37-abi3-manylinux_2_28_x86_64.whl (63.7 MB)\n'
+                       '     ━━━━━ 12.0/63.7 MB 494.0 kB/s eta 0:01:44\n')
+        self.assertEqual(setup.log_activity(log), ('下载 Python 依赖', 'opencv_python_headless（63.7 MB）'))
+        log.write_text('Installing collected packages: einops, av\n')
+        self.assertEqual(setup.log_activity(log)[0], '安装 Python 依赖包')
+        self.assertEqual(setup.log_activity(self.root / 'missing.log'), ('安装运行环境', ''))
+
+    def test_template_gallery_is_left_out(self):
+        core = self.root / 'ComfyUI'
+        core.mkdir()
+        (core / 'requirements.txt').write_text('comfyui-frontend-package==1.52.7\ncomfyui-workflow-templates==0.11.66\ntorch\n')
+        out = setup.core_requirements(core, self.root / 'req.txt').read_text()
+        self.assertNotIn('workflow-templates', out)
+        self.assertIn('comfyui-frontend-package', out)
+
+    def test_heartbeat_reports_bytes_and_clears_when_done(self):
+        import threading
+        state, lock = {'status': 'running'}, threading.Lock()
+        (self.root / 'setup.log').write_text('Collecting av\n')
+        with setup.Heartbeat(self.root, state, lock, interval=0.05):
+            (self.root / 'pip-cache').mkdir()
+            (self.root / 'pip-cache' / 'a.whl').write_bytes(b'x' * 4096)
+            time.sleep(0.3)
+            seen = json.loads((self.root / 'state.json').read_text())['activity']
+        self.assertEqual(seen['bytes'], 4096)
+        self.assertEqual(seen['detail'], 'av')
+        self.assertNotIn('activity', state)

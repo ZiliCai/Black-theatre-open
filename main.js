@@ -726,7 +726,7 @@ function registerIpc() {
       return { status: 'attention', phase: 'selfcheck', historical: true, video: cached.preview.endsWith('.mp4'), report: cached,
         message: '当前无法连接实例。以下为上次自检记录，开机并连接后可以重新自检。' };
     }
-    const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, video: s.video, modelsOnly: s.modelsOnly === true };
+    const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, activity: s.activity, since: s.since, video: s.video, modelsOnly: s.modelsOnly === true };
     if (s.status !== 'ready') {
       // A GPU-less download run ends here; acceptance needs a second run after a GPU boot.
       if ((s.status === 'failed' || s.status === 'downloaded') && watch?.pending && config.setupWatch === watch) {

@@ -3,6 +3,12 @@ import { api, type SetupState } from '../../api';
 import { Button, TextInput } from '../../components';
 
 const gib = (bytes: number) => (bytes / 2 ** 30).toFixed(2);
+const size = (bytes: number) => bytes >= 2 ** 30 ? `${gib(bytes)} GiB` : `${Math.round(bytes / 2 ** 20)} MB`;
+const speed = (rate: number) => rate >= 2 ** 20 ? `${(rate / 2 ** 20).toFixed(1)} MB/s` : `${Math.round(rate / 1024)} KB/s`;
+const span = (seconds: number) => seconds < 60 ? `${Math.max(0, Math.round(seconds))} 秒` : seconds < 3600
+  ? `${Math.floor(seconds / 60)} 分钟` : `${Math.floor(seconds / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分钟`;
+// No byte moved and no log line for this long reads as stuck rather than slow.
+const STALL = 180;
 const clock = (ms: number) => new Date(ms).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 
 export function SetupProgress({ state, offline }: { state: SetupState; offline: boolean }) {
@@ -23,6 +29,12 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
   const estimate = seconds === null ? null : now + seconds * 1000;
   const minutes = Number(reserve);
   const problem = state.status === 'failed' || state.status === 'attention';
+  const running = state.status === 'running' && !offline;
+  // Seconds on the instance's clock where the installer reports them, so a skewed local clock does not lie.
+  const act = running ? state.activity : undefined;
+  const cloudNow = act ? act.clock : now / 1000;
+  const elapsed = running && state.since ? cloudNow - state.since : null;
+  const idle = act ? act.clock - act.updated : 0;
   const title = state.historical ? '上次自检结果' : state.status === 'downloaded' ? '模型已就绪' : completed ? '自检通过'
     : state.status === 'attention' ? '自检需要处理' : stage < 0 ? '配置进度' : steps[stage][1];
   // Only states that ask the user to act get a sentence of their own.
@@ -41,6 +53,12 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
       <progress aria-label="模型下载进度" max={d.total} value={d.saved} />
     </div>}
     <div className={problem ? 'errors' : 'setup-message muted'} role="status">{state.message}</div>
+    {act && <div className="setup-activity" id="setup-activity">
+      <span>{act.label}{act.detail ? '：' + act.detail : ''}</span>
+      <span className="muted">本阶段已下载 {size(act.bytes)}{act.rate > 0 ? ' · ' + speed(act.rate) : ''} · {idle < 10 ? '刚刚有进展' : span(idle) + '前有进展'}</span>
+    </div>}
+    {elapsed !== null && elapsed >= 60 && <p className="muted setup-elapsed">本阶段已进行 {span(elapsed)}。实例开机期间一直在计费。</p>}
+    {act && idle >= STALL && <div className="errors" role="alert">已经 {span(idle)}没有任何进展，可能是网络卡住了。{'可以再等几分钟；如果超过 15 分钟仍没有变化，到 AutoDL 控制台关机止损，下次开机后点「重试配置并验收」，已下载的内容会复用。'}</div>}
     {state.report && <section aria-label="配置自检报告" className="check-report">
       <div className="welcome-heading"><strong>配置自检报告</strong><span className="muted">{clock(state.report.at)}</span></div>
       <ul>{state.report.checks.map((item) => <li key={item.id}>

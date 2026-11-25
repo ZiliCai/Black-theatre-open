@@ -89,7 +89,7 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
   const optionsOpen = optionsToggled ?? !started;
   const badge = summary(state, watch);
   const startLabel = uploading ? '正在上传安装包…' : busy ? '配置进行中…' : modelsOnly ? '开始下载模型'
-    : state?.status === 'failed' ? '重试配置并验收' : started ? '重新配置并验收' : '配置并验收';
+    : state?.status === 'failed' ? '重试配置并验收' : started && state?.status !== 'downloaded' ? '重新配置并验收' : '配置并验收';
   return <section className="card setup-card" id="autodl-setup" data-profile={profile}>
     <div className="welcome-heading">
       <h3>云端配置</h3>

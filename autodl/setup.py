@@ -4,11 +4,13 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import urllib.error
@@ -54,10 +56,40 @@ def run(args):
     subprocess.run([str(a) for a in args], check=True)
 
 
+# Package mirrors on AutoDL drop out for minutes at a time; pip keeps finished downloads in its
+# cache (or the run is idempotent), so going round again is cheap.
+PIP_PAUSES = (30, 90, 180)
+
+
+def pip_install(args):
+    flags = ['--timeout', '60', '--retries', '10']
+    for pause in (*PIP_PAUSES, None):
+        try:
+            return run([*args[:4], *flags, *args[4:]])
+        except subprocess.CalledProcessError:
+            if pause is None:
+                raise
+            print(f'安装 Python 依赖时网络中断，{pause} 秒后重试', flush=True)
+            time.sleep(pause)
+
+
+# ComfyUI's template browser pulls about 480 MB of sample images and videos from five media
+# packages. The app drives ComfyUI through its API and never shows that gallery; without the
+# package ComfyUI only logs that templates are unavailable.
+SKIPPED_REQUIREMENTS = ('comfyui-workflow-templates',)
+
+
+def core_requirements(core, target):
+    lines = [line for line in (core / 'requirements.txt').read_text().splitlines()
+             if not line.strip().lower().startswith(SKIPPED_REQUIREMENTS)]
+    target.write_text('\n'.join(lines) + '\n')
+    return target
+
+
 def environment(root, plugins):
     py = root / 'venv/bin/python'
     core = root / 'ComfyUI'
-    requirements = [core / 'requirements.txt']
+    requirements = [core_requirements(core, root / 'comfyui-requirements.txt')]
     for name in plugins:
         source = BUNDLE / 'comfyui-plugins' / name
         target = core / 'custom_nodes' / name
@@ -91,7 +123,7 @@ def environment(root, plugins):
              'assert torch.ones(1,device="cuda").item() == 1; print(torch.__version__,torchvision.__version__)')
     check = subprocess.run([str(py), '-c', probe], stdout=subprocess.PIPE, text=True)
     if check.returncode:
-        run(pip + ['--index-url', 'https://download.pytorch.org/whl/cu128', 'torch==2.11.0',
+        pip_install(pip + ['--index-url', 'https://download.pytorch.org/whl/cu128', 'torch==2.11.0',
                    'torchvision==0.26.0', 'torchaudio==2.11.0'])
         check = subprocess.run([str(py), '-c', probe], capture_output=True, text=True, check=True)
     torch, vision = check.stdout.strip().splitlines()[-1].split()
@@ -100,12 +132,90 @@ def environment(root, plugins):
     if subprocess.run([str(py), '-c', 'import torchaudio']).returncode:
         cuda = torch.split('+')[-1]
         index = 'https://download.pytorch.org/whl/' + (cuda if cuda.startswith('cu') else 'cu128')
-        run(pip + ['--index-url', index, '--no-deps', 'torchaudio==2.11.0'])
+        pip_install(pip + ['--index-url', index, '--no-deps', 'torchaudio==2.11.0'])
     reqs = [arg for req in requirements for arg in ('-r', req)]
     # Keep reusable dependency wheels on the data disk when a network failure interrupts pip.
-    run([py, '-m', 'pip', 'install', '--cache-dir', root / 'pip-cache', '-c', constraints, *reqs])
+    pip_install([py, '-m', 'pip', 'install', '--cache-dir', root / 'pip-cache', '-c', constraints, *reqs])
     run([py, '-c', 'import torch,torchaudio; assert torch.cuda.is_available()'])
     write_json(stamp, version)
+
+
+def folder_bytes(*folders):
+    total = 0
+    for folder in folders:
+        for base, _, names in os.walk(folder):
+            for name in names:
+                try:
+                    total += os.lstat(os.path.join(base, name)).st_size
+                except OSError:
+                    pass
+    return total
+
+
+def log_activity(log):
+    """What the installer is doing now, from the last telling line of setup.log."""
+    try:
+        with log.open('rb') as f:
+            f.seek(max(0, f.seek(0, 2) - 16384))
+            lines = f.read().decode('utf-8', 'replace').splitlines()
+    except OSError:
+        return '安装运行环境', ''
+    for line in reversed(lines):
+        line = line.strip()
+        if m := re.match(r'Downloading \S*?([^/\s]+?)-\d[^/\s]*\.(?:whl|tar\.gz|zip)\s*\(([^)]+)\)', line):
+            return '下载 Python 依赖', f'{m[1]}（{m[2]}）'
+        if m := re.match(r'Collecting (\S+)', line):
+            return '下载 Python 依赖', m[1]
+        if line.startswith('Installing collected packages'):
+            return '安装 Python 依赖包', ''
+        if line.startswith(('Building wheel', 'Building wheels')):
+            return '编译 Python 依赖', ''
+        if line.startswith('安装 Python 依赖时网络中断'):
+            return '网络中断，等待重试', line
+    return '安装运行环境', ''
+
+
+class Heartbeat:
+    """Every few seconds, record bytes fetched and the current item so a slow mirror reads as slow, not stuck."""
+    def __init__(self, root, state, lock, interval=5):
+        self.root, self.state, self.lock, self.interval = root, state, lock, interval
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.loop, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop.set()
+        self.thread.join(timeout=self.interval + 1)
+        with self.lock:
+            self.state.pop('activity', None)
+
+    def sample(self):
+        return folder_bytes(self.root / 'pip-cache', self.root / 'tmp', self.root / 'conda-cache') + (
+            (self.root / 'comfy.tar.gz').stat().st_size if (self.root / 'comfy.tar.gz').is_file() else 0)
+
+    def loop(self):
+        log = self.root / 'setup.log'
+        start = last_bytes = self.sample()
+        last_log = log.stat().st_mtime if log.is_file() else 0
+        updated = time.time()
+        window = [(time.monotonic(), last_bytes)]
+        while not self.stop.wait(self.interval):
+            now_bytes = self.sample()
+            now_log = log.stat().st_mtime if log.is_file() else 0
+            if now_bytes != last_bytes or now_log != last_log:
+                updated = time.time()
+            last_bytes, last_log = now_bytes, now_log
+            window = [*window, (time.monotonic(), now_bytes)][-7:]
+            span = window[-1][0] - window[0][0]
+            rate = max(0, window[-1][1] - window[0][1]) / span if span > 0 else 0
+            label, detail = log_activity(log)
+            with self.lock:
+                self.state['activity'] = {'label': label, 'detail': detail, 'bytes': max(0, now_bytes - start),
+                                          'rate': rate, 'updated': updated, 'clock': time.time()}
+                write_json(self.root / 'state.json', self.state)
 
 
 def wait_ready(api, root):
@@ -124,6 +234,8 @@ def execute(root, port, state):
     state_lock = threading.Lock()
     def step(phase, text):
         with state_lock:
+            if state.get('phase') != phase or 'since' not in state:
+                state['since'] = time.time()
             state.update(status='running', phase=phase, message=text)
             write_json(root / 'state.json', state)
             print(text, flush=True)
@@ -171,8 +283,9 @@ def execute(root, port, state):
                           f'模型待下载 {needed/GIB:.1f} GiB，运行环境预留 {reserve/GIB:.0f} GiB')
         ensure_space(root, needed, reserve)
         def install_runtime():
-            install_core(root)
-            environment(root, recipe['plugins'])
+            with Heartbeat(root, state, state_lock):
+                install_core(root)
+                environment(root, recipe['plugins'])
             shutil.copyfile(BUNDLE / 'autodl/service.py', root / 'service.py')
 
         progress = DownloadProgress(files, pending)

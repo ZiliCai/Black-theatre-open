@@ -120,36 +120,40 @@ def download(dest, spec, notify):
                 notify(0)
                 ranges.journal(part).unlink(missing_ok=True)
         ranges.contiguous(part, spec)
-    for url in spec['urls']:
-        # A truncated transfer is resumable even from another mirror of this digest.
-        for attempt in range(2):
-            size = part.stat().st_size if part.exists() else 0
-            if size > spec['bytes']:
-                part.unlink()
-                size = 0
-            notify(size)
-            if size < spec['bytes']:
-                result = subprocess.Popen(['curl', '-fsSL', '--connect-timeout', '15', '--speed-time', '45',
-                                         '--speed-limit', '8192', '--retry', '2', '-C', '-', '-o', str(part), url])
-                while True:
-                    try:
-                        result.wait(timeout=2)
+    for pause in (0, *PAUSES):
+        if pause:
+            print(f'所有下载源暂时都连不上，{pause} 秒后再试一轮：{dest.name}', flush=True)
+            time.sleep(pause)
+        for url in spec['urls']:
+            # A truncated transfer is resumable even from another mirror of this digest.
+            for attempt in range(2):
+                size = part.stat().st_size if part.exists() else 0
+                if size > spec['bytes']:
+                    part.unlink()
+                    size = 0
+                notify(size)
+                if size < spec['bytes']:
+                    result = subprocess.Popen(['curl', '-fsSL', '--connect-timeout', '15', '--speed-time', '45',
+                                             '--speed-limit', '8192', '--retry', '2', '-C', '-', '-o', str(part), url])
+                    while True:
+                        try:
+                            result.wait(timeout=2)
+                            break
+                        except subprocess.TimeoutExpired:
+                            notify(part.stat().st_size if part.is_file() else 0)
+                    if result.returncode:
+                        if result.returncode in (33, 36) and size and attempt == 0:
+                            part.unlink(missing_ok=True)
+                            continue
                         break
-                    except subprocess.TimeoutExpired:
-                        notify(part.stat().st_size if part.is_file() else 0)
-                if result.returncode:
-                    if result.returncode in (33, 36) and size and attempt == 0:
-                        part.unlink(missing_ok=True)
-                        continue
+                if matches(part, spec):
+                    notify(spec['bytes'])
+                    os.replace(part, dest)
+                    remember(dest, spec)
+                    return
+                if part.is_file() and part.stat().st_size >= spec['bytes']:
+                    part.unlink()
+                    notify(0)
+                else:
                     break
-            if matches(part, spec):
-                notify(spec['bytes'])
-                os.replace(part, dest)
-                remember(dest, spec)
-                return
-            if part.is_file() and part.stat().st_size >= spec['bytes']:
-                part.unlink()
-                notify(0)
-            else:
-                break
     raise RuntimeError('模型下载或 SHA-256 校验失败：' + dest.name + '。检查云端网络后可继续。')
