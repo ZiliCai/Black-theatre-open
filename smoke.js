@@ -272,10 +272,17 @@ async function runSmoke(h) {
     const missing = API.filter((k) => !keys.includes(k));
     if (missing.length) return fail(`window.launcher is missing: ${missing.join(', ')}`);
     await waitFor("!!document.querySelector('.app')", 10000, 'the app shell');
+    // While guide steps remain, the guide opens full screen over the workspace, in its larger text.
+    const guideFull = "document.getElementById('guide')?.classList.contains('full') && getComputedStyle(document.querySelector('.app > .page')).display === 'none'";
+    await waitFor(guideFull, 3000, 'the unfinished guide opens full screen');
+    if ((await js("getComputedStyle(document.querySelector('#guide .g-title')).fontSize")) !== '16px') return fail('the full-screen guide should use 16px step titles');
+    await shot('guide-full');
     for (const p of PAGES) {
       await click(`#nav-${p}`);
       await waitFor(`!!document.getElementById('page-${p}')`, 3000, `page-${p} after clicking nav-${p}`);
     }
+    await waitFor("!document.getElementById('guide').classList.contains('full') && getComputedStyle(document.querySelector('.app > .page')).display !== 'none'", 3000, 'going to a page puts the guide beside it');
+    if ((await js("getComputedStyle(document.querySelector('#guide .g-title')).fontSize")) !== '15px') return fail('the side guide should use 15px step titles');
     await waitFor("document.getElementById('project-pick').textContent.includes('地铁惊魂')", 5000, 'the active project in the top bar');
     await waitFor("document.getElementById('state-badge').textContent.includes('运行中')", 8000, 'ComfyUI shown as running');
     await click('#comfy-status');
@@ -301,9 +308,15 @@ async function runSmoke(h) {
     await js("[...document.querySelectorAll('#guide-route button')].find((b) => b.textContent.startsWith('租云 GPU')).click()");
     await waitFor("!!document.getElementById('guide-autodl-rent')", 3000, 'back on the AutoDL route');
     await click('#nav-shots');
+    await click('#guide-full');
+    await waitFor(guideFull, 3000, 'the 全屏 button puts the guide full screen');
+    await click('#guide-side');
+    await waitFor("!document.getElementById('guide').classList.contains('full') && !!document.getElementById('page-shots')", 3000, '边看边做 brings the page back beside the guide');
+    await click('#guide-full');
+    await waitFor(guideFull, 3000, 'full screen again');
     await click('#guide-script .g-title');
     await js("[...document.querySelectorAll('#guide-script .g-actions button')].find((b) => b.textContent === '去剧本页').click()");
-    await waitFor("!!document.getElementById('page-script')", 3000, 'the guide takes the user to the page of a step');
+    await waitFor("!!document.getElementById('page-script') && !document.getElementById('guide').classList.contains('full')", 3000, 'the guide takes the user to the page of a step and steps beside it');
     await click('#guide-script .g-mark');
     await waitFor("document.getElementById('guide-script').classList.contains('done') && document.getElementById('guide-breakdown').classList.contains('open')", 3000, 'marking a step done opens the next one');
     await shot('guide');

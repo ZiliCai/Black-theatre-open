@@ -52,6 +52,9 @@ export function App() {
   const updateGuide = useCallback((change: Partial<GuideSaved>) => {
     setGuide((g) => { const next = { ...g, ...change }; saveGuide(next); return next; });
   }, []);
+  // Full screen or beside the page, for this session only: null lets the guide go full screen while
+  // steps remain. Going to any page puts it beside that page, since a full-screen guide would hide it.
+  const [guideFull, setGuideFull] = useState<boolean | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
   const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
   const [projects, setProjects] = useState<Loose[]>([]);
@@ -77,6 +80,7 @@ export function App() {
       } else if (r.config.cloudWelcome === 'watch' && r.config.target === r.config.setupWatch?.id) {
         setPage('settings');
         setSettingsTab('remote');
+        setGuideFull(false);
       } else if (!r.validation.ok && r.config.target === 'local') {
         setPage('settings');
         setSettingsTab('general');
@@ -95,6 +99,7 @@ export function App() {
   const go = useCallback(async (next: PageId, tab?: SettingsTab) => {
     if (leaveGuard.current && !(await leaveGuard.current())) return;
     setPage(next);
+    setGuideFull(false);
     if (tab) setSettingsTab(tab);
     try { localStorage.setItem(PAGE_KEY, next); } catch { /* not remembered, that is all */ }
   }, []);
@@ -113,7 +118,7 @@ export function App() {
   const leaveOnboarding = useCallback((to: OnboardingExit) => {
     setOnboarding(false);
     updateGuide(to === 'general' ? { open: true, route: 'local' } : { open: true });
-    if (to) { setPage('settings'); setSettingsTab(to); }
+    if (to) { setPage('settings'); setSettingsTab(to); setGuideFull(false); }
   }, [updateGuide]);
 
   if (initializing) return null;
@@ -139,7 +144,7 @@ export function App() {
             : page === 'settings' ? <SettingsPage />
             : <AssetsPage />}
         </main>
-        {guide.open && <Guide page={page} saved={guide} update={updateGuide} />}
+        {guide.open && <Guide page={page} saved={guide} update={updateGuide} full={guideFull} setFull={setGuideFull} />}
       </div>
     </AppContext.Provider>
   );

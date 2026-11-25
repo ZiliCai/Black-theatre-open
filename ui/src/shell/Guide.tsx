@@ -66,9 +66,11 @@ function Zoom({ shot, close }: { shot: { src: string; alt: string }; close: () =
   </div>;
 }
 
-/** The guide docked beside every page, so the user can follow it while working. */
-export function Guide({ page, saved, update }: {
+/** The guide docked beside every page, so the user can follow it while working. While steps remain it
+ *  opens full screen; `full` is the user's choice for this session, null meaning that default. */
+export function Guide({ page, saved, update, full, setFull }: {
   page: PageId; saved: GuideSaved; update: (change: Partial<GuideSaved>) => void;
+  full: boolean | null; setFull: (full: boolean) => void;
 }) {
   const { go, project, settingsTab } = useApp();
   const { done, route } = saved;
@@ -117,6 +119,7 @@ export function Guide({ page, saved, update }: {
   const firstOpen = steps.find((s) => !isDone(s.id))?.id ?? null;
   const [expanded, setExpanded] = useState<string | null>(firstOpen);
   const count = steps.filter((s) => isDone(s.id)).length;
+  const isFull = full ?? count < steps.length;
   // The key or project shows up after the first render: move past a step that just completed itself.
   useEffect(() => {
     if (expanded && auto.has(expanded)) setExpanded(firstOpen);
@@ -137,14 +140,19 @@ export function Guide({ page, saved, update }: {
     setExpanded(GUIDE.find((s) => (!s.route || s.route === next) && !isDone(s.id))?.id ?? null);
   }
 
-  return <aside className={dragging ? 'guide resizing' : 'guide'} id="guide" aria-label="使用指南" ref={panel}>
-    <div className="g-resize" role="separator" aria-orientation="vertical" aria-label="调整指南宽度"
-      title="拖动调整宽度，双击恢复默认" onPointerDown={startResize} onDoubleClick={() => update({ width: undefined })} />
+  return <aside className={'guide' + (isFull ? ' full' : '') + (dragging ? ' resizing' : '')} id="guide" aria-label="使用指南" ref={panel}>
+    {!isFull && <div className="g-resize" role="separator" aria-orientation="vertical" aria-label="调整指南宽度"
+      title="拖动调整宽度，双击恢复默认" onPointerDown={startResize} onDoubleClick={() => update({ width: undefined })} />}
     <header className="g-head">
       <div><strong>使用指南</strong><span className="muted">{count === steps.length ? '全部完成' : `已完成 ${count} / ${steps.length}`}</span></div>
       <div className="g-head-actions">
-        <Button variant="ghost" size="sm" id="guide-wide" aria-pressed={wide} title={wide ? '恢复默认宽度' : '放宽指南，截图看得更清楚'}
-          onClick={() => update({ width: wide ? undefined : clampWidth(WIDE) })}><Icon name="expand" />{wide ? '收窄' : '放宽'}</Button>
+        {isFull
+          ? <Button variant="ghost" size="sm" id="guide-side" title="把指南收到右侧，一边看一边在软件里操作" onClick={() => setFull(false)}>边看边做</Button>
+          : <>
+            <Button variant="ghost" size="sm" id="guide-full" aria-label="全屏" title="全屏：指南铺满窗口，看得更清楚" onClick={() => setFull(true)}><Icon name="expand" /></Button>
+            <Button variant="ghost" size="sm" id="guide-wide" aria-pressed={wide} title={wide ? '恢复默认宽度' : '放宽指南，截图看得更清楚'}
+              onClick={() => update({ width: wide ? undefined : clampWidth(WIDE) })}>{wide ? '收窄' : '放宽'}</Button>
+          </>}
         <Button variant="ghost" size="sm" aria-label="收起指南" title="收起指南，左侧「指南」可再打开" onClick={() => update({ open: false })}><Icon name="x" /></Button>
       </div>
     </header>
@@ -174,7 +182,7 @@ export function Guide({ page, saved, update }: {
               {step.warn && <p className="g-warn"><Icon name="warn" size={14} /><span><Text text={step.warn} /></span></p>}
               {step.tip && <p className="g-tip"><Text text={step.tip} /></p>}
               <div className="g-actions">
-                {step.go && !here && <Button size="sm" variant="primary" onClick={() => go(step.go!.page, step.go!.tab)}>{step.go.label}</Button>}
+                {step.go && (!here || isFull) && <Button size="sm" variant="primary" onClick={() => go(step.go!.page, step.go!.tab)}>{step.go.label}</Button>}
                 {step.links?.map((link) => <Button key={link.site} size="sm" onClick={() => api.cloudOpen(link.site)}><Icon name="link" />{link.label}</Button>)}
                 {!auto.has(step.id) && <Button size="sm" variant="ghost" className="g-mark" onClick={() => toggleDone(step.id)}>
                   {finished ? '标为未完成' : '这步做完了'}</Button>}

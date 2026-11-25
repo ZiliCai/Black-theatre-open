@@ -1,43 +1,55 @@
 /* The guide sits in its own column to the right of every page. */
 /* Without a width the user chose, the guide grows with the window; the page always keeps 480px. */
 .app.with-guide { grid-template-columns: var(--nav-w) minmax(0, 1fr)
-  min(var(--guide-w, clamp(340px, 26vw, 520px)), max(300px, calc(100vw - var(--nav-w) - 480px))); }
+  min(var(--guide-w, clamp(360px, 28vw, 560px)), max(300px, calc(100vw - var(--nav-w) - 480px))); }
 .app > .guide { grid-row: 3; grid-column: 3; min-height: 0; }
-.guide { position: relative; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
+/* Its own text sizes, a step up from the rest of the app: beginners read it line by line. */
+.guide { --g-fs: 15px; --g-fs-s: 13px; --g-page: 0px;
+  position: relative; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
+/* Full screen while steps remain: the guide takes the whole workspace in a readable centred column.
+   The page stays mounted underneath and comes back as soon as the user goes to it. */
+.app.with-guide:has(> .guide.full) { grid-template-columns: var(--nav-w) minmax(0, 1fr); }
+.app:has(> .guide.full) > .page { display: none; }
+.app > .guide.full { grid-column: 2; }
+.guide.full { --g-fs: 16px; --g-fs-s: 14px; --g-page: max(0px, calc((100% - 980px) / 2)); border-left: 0; }
+.guide.full > .g-head, .guide.full > .g-route { padding-left: calc(var(--s4) + var(--g-page)); padding-right: calc(var(--s3) + var(--g-page)); }
+.guide.full > .g-progress { margin-left: calc(var(--s4) + var(--g-page)); margin-right: calc(var(--s4) + var(--g-page)); }
+.guide.full > .g-steps { padding-left: calc(var(--s2) + var(--g-page)); padding-right: calc(var(--s2) + var(--g-page)); }
+.guide.full .g-shot { max-width: 900px; }
 /* The left edge is a drag handle; a wider hit area than the 1px border, highlighted on hover. */
 .g-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 7px; z-index: 2; cursor: col-resize; touch-action: none; }
 .g-resize:hover, .guide.resizing .g-resize { background: color-mix(in srgb, var(--acc) 45%, transparent); }
 .guide.resizing { user-select: none; }
 .g-head-actions { display: flex; align-items: center; gap: 2px; }
 .g-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2) var(--s4); }
-.g-head > div { display: flex; align-items: baseline; gap: var(--s2); }
-.g-head strong { font-size: var(--fs-md); }
-.g-head .muted { color: var(--dim); font-size: var(--fs-xs); }
+.g-head > div { display: flex; align-items: baseline; gap: var(--s2); white-space: nowrap; }
+.g-head strong { font-size: calc(var(--g-fs) + 2px); }
+.g-head .muted { color: var(--dim); font-size: var(--g-fs-s); }
 .g-progress { margin: 0 var(--s4) var(--s2); width: auto; height: 4px; accent-color: var(--acc); }
 .g-steps { list-style: none; margin: 0; padding: 0 var(--s2) var(--s4); overflow: auto; flex: 1; }
 .g-steps > li.g-step { border-radius: var(--r3); }
 .g-steps > li.g-step.open { background: var(--panel-2); }
 .g-title { width: 100%; display: flex; align-items: center; gap: var(--s2); padding: 9px var(--s2); border-radius: var(--r3);
-  color: var(--sub); font-size: var(--fs-sm); text-align: left; }
+  color: var(--sub); font-size: var(--g-fs); text-align: left; }
 .g-title:hover { color: var(--text); }
 .g-title .t { flex: 1; }
-.g-title .tag { padding: 0 6px; border-radius: var(--r1); border: 1px solid var(--line); color: var(--dim); font-size: var(--fs-xs); }
+.g-title .tag { padding: 0 6px; border-radius: var(--r1); border: 1px solid var(--line); color: var(--dim); font-size: var(--g-fs-s); }
 .g-title > svg { color: var(--dim); transform: rotate(-90deg); transition: transform .15s; }
 .g-steps > li.open .g-title { color: var(--text); font-weight: 600; }
 .g-steps > li.open .g-title > svg { transform: none; }
-.g-title .n { width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; display: grid; place-items: center;
-  border: 1px solid var(--line); font-size: var(--fs-xs); font-weight: 400; }
+.g-title .n { width: 24px; height: 24px; flex-shrink: 0; border-radius: 50%; display: grid; place-items: center;
+  border: 1px solid var(--line); font-size: var(--g-fs-s); font-weight: 400; }
 .g-steps > li.open:not(.done) .n { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
 .g-steps > li.done .n { border-color: var(--good); color: var(--good); }
 .g-steps > li.done:not(.open) .t { color: var(--dim); }
-.g-body { padding: 0 var(--s3) var(--s3) 38px; display: grid; gap: var(--s2); font-size: var(--fs-sm); line-height: 1.7; }
+.g-body { padding: 0 var(--s3) var(--s3) 40px; display: grid; gap: 10px; font-size: var(--g-fs); line-height: 1.75; }
 .g-goal { margin: 0; color: var(--sub); }
 .g-items { display: grid; gap: var(--s2); color: var(--sub); }
 .g-item { margin: 0; padding-left: 12px; position: relative; }
 .g-item::before { content: ''; position: absolute; left: 0; top: .75em; width: 4px; height: 4px; border-radius: 50%; background: var(--dim); }
 /* Red numbers match the marks drawn on the AutoDL screenshots. */
-.g-num { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; margin: 0 2px; border-radius: 9px;
-  background: #e5262a; color: #fff; font-size: 11px; font-weight: 700; line-height: 1; vertical-align: 1px; }
+.g-num { display: inline-grid; place-items: center; min-width: 21px; height: 21px; padding: 0 5px; margin: 0 2px; border-radius: 11px;
+  background: #e5262a; color: #fff; font-size: 13px; font-weight: 700; line-height: 1; vertical-align: 1px; }
 .g-shot { display: block; width: 100%; padding: 0; border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden;
   background: #fff; cursor: zoom-in; }
 .g-shot:hover { border-color: var(--acc); }
@@ -51,8 +63,8 @@
 .g-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .g-mark { margin-left: auto; }
 .g-route { display: grid; gap: 6px; padding: 0 var(--s4) var(--s3); border-bottom: 1px solid var(--line); }
-.g-route > span { color: var(--dim); font-size: var(--fs-xs); }
-.g-part { list-style: none; padding: var(--s4) var(--s2) var(--s1); color: var(--dim); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .5px; }
+.g-route > span { color: var(--dim); font-size: var(--g-fs-s); }
+.g-part { list-style: none; padding: var(--s4) var(--s2) var(--s1); color: var(--dim); font-size: var(--g-fs-s); font-weight: 600; letter-spacing: .5px; }
 .g-warn { margin: 0; display: flex; gap: 6px; align-items: flex-start; padding: 6px var(--s2); border-radius: var(--r2);
   background: color-mix(in srgb, var(--acc) 10%, transparent); color: var(--text); }
 .g-warn svg { flex-shrink: 0; margin-top: 4px; color: var(--acc); }
