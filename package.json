@@ -1,6 +1,6 @@
 {
   "name": "blackbox-theater",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "黑箱剧场 BlackBox Theater:ComfyUI 固定工作流控制台(MiniMax H3 短剧生成)",
   "private": true,
   "license": "GPL-3.0-only",
