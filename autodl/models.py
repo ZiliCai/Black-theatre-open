@@ -100,7 +100,7 @@ def download(dest, spec, notify):
             try:
                 ranges.transfer(part, spec, url, notify)
             except (OSError, ValueError) as exc:
-                print(f'分段下载换源：{type(exc).__name__}', flush=True)
+                print(f'分段下载换源：{type(exc).__name__}: {str(exc)[:300]}', flush=True)
                 continue
             if matches(part, spec):
                 notify(spec['bytes'])

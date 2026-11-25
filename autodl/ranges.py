@@ -14,7 +14,10 @@ except ImportError:  # minimal Linux images can use the standard library
     requests = None
 
 CHUNK = 16 * 1024 * 1024
-WORKERS = 16
+# Connections per file; setup.py fetches three files at once. On an AutoDL instance (~100 Mbit/s)
+# 3 x 4 connections fill the link, while 3 x 8 or 3 x 16 stalled with no chunk finishing for minutes.
+WORKERS = 4
+ATTEMPTS = 6
 
 
 def journal(part):
@@ -79,11 +82,12 @@ def transfer(part, spec, url, notify):
             if index is None:
                 return
             start, end = index * CHUNK, min(total, (index + 1) * CHUNK) - 1
-            for attempt in range(4):
+            for attempt in range(ATTEMPTS):
                 if stop.is_set():
                     return
                 try:
-                    source = direct if attempt < 2 else url
+                    # Later attempts go through the original URL again to refresh a signed CDN link.
+                    source = direct if attempt < ATTEMPTS // 2 else url
                     headers = {'Range': f'bytes={start}-{end}', 'Accept-Encoding': 'identity'}
                     if session:
                         response = session.get(source, headers=headers, timeout=(10, 30), stream=True)
@@ -111,10 +115,10 @@ def transfer(part, spec, url, notify):
                                 remaining -= len(data)
                     break
                 except Exception as exc:
-                    if attempt == 3 or isinstance(exc, ValueError):
+                    if attempt == ATTEMPTS - 1 or isinstance(exc, ValueError):
                         stop.set()
-                        raise OSError('该源未能提供完整分段') from exc
-                    time.sleep(attempt + 0.5)
+                        raise OSError(f'该源未能提供完整分段：{type(exc).__name__}: {str(exc)[:200]}') from exc
+                    time.sleep(min(2 ** attempt, 15))
             with lock:
                 done.add(index)
                 save()
