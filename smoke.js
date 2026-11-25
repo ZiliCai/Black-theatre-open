@@ -286,6 +286,20 @@ async function runSmoke(h) {
     // ---- the guide: open on first start, follows the user to each page, closing sticks ----
     await waitFor("!!document.getElementById('guide')", 3000, 'the guide on first start');
     await waitFor("document.getElementById('guide-project')?.classList.contains('done')", 3000, 'an active project ticks the project step');
+    await waitFor("document.getElementById('guide-autodl-account')?.classList.contains('open')", 3000, 'a beginner starts at the AutoDL account');
+    await shot('guide-start');
+    await click('#guide-autodl-rent .g-title');
+    await waitFor("[...document.querySelectorAll('#guide-autodl-rent .g-shot img')].every((i) => i.complete && i.naturalWidth > 0) && document.querySelectorAll('#guide-autodl-rent .g-num').length >= 4", 3000, 'numbered AutoDL screenshots in the rent step');
+    await shot('guide-rent');
+    await click('#guide-autodl-rent .g-shot:nth-of-type(2)');
+    await waitFor("!!document.querySelector('.g-zoom img')", 3000, 'a screenshot opens at full size');
+    await shot('guide-zoom');
+    await click('.g-zoom');
+    await waitFor("!document.querySelector('.g-zoom')", 3000, 'the full-size screenshot closes');
+    await js("[...document.querySelectorAll('#guide-route button')].find((b) => b.textContent === '用自己的显卡').click()");
+    await waitFor("!!document.getElementById('guide-local-comfy') && !document.getElementById('guide-autodl-rent')", 3000, 'the own-card route swaps the AutoDL steps');
+    await js("[...document.querySelectorAll('#guide-route button')].find((b) => b.textContent.startsWith('租云 GPU')).click()");
+    await waitFor("!!document.getElementById('guide-autodl-rent')", 3000, 'back on the AutoDL route');
     await click('#nav-shots');
     await click('#guide-script .g-title');
     await js("[...document.querySelectorAll('#guide-script .g-actions button')].find((b) => b.textContent === '去剧本页').click()");
@@ -776,6 +790,7 @@ async function runSmoke(h) {
     const runId = 'c'.repeat(32);
     const imageBytes = fs.readFileSync(path.join(FIXTURES, 'media', 'sample.png'));
     let ready = false;
+    let stalled = 4;
     let launches = 0;
     let chatChecks = 0;
     const selfcheck = require('./src/setup-selfcheck');
@@ -797,8 +812,10 @@ async function runSmoke(h) {
     autodl.status = async () => ready ? {
       status: 'ready', phase: 'transfer', file: 'ref/bbt_acceptance_' + runId + '_00001.png', run: runId,
       sha256: require('node:crypto').createHash('sha256').update(imageBytes).digest('hex'), bytes: imageBytes.length, video: false,
-    } : { status: 'running', phase: 'models', video: false, message: '正在下载测试模型',
-      download: { total: 8 * 2 ** 30, saved: 2 * 2 ** 30, rate: 8 * 2 ** 20, updated: Date.now() / 1000 } };
+    } : { status: 'running', phase: 'models', video: false, message: '正在下载测试模型', since: Date.now() / 1000 - 600,
+      download: { total: 8 * 2 ** 30, saved: 2 * 2 ** 30, rate: 8 * 2 ** 20, updated: Date.now() / 1000 },
+      activity: { label: '下载 Python 依赖', detail: 'opencv_python_headless（63.7 MB）', bytes: 780 * 2 ** 20, rate: 500 * 1024,
+        updated: Date.now() / 1000 - stalled, clock: Date.now() / 1000 } };
     const reload = () => new Promise((resolve) => {
       win.webContents.once('did-finish-load', resolve);
       win.webContents.reload();
@@ -824,6 +841,10 @@ async function runSmoke(h) {
     await waitFor("document.querySelector('.setup-progress')?.textContent.includes('25%') && !!document.querySelector('.shutdown-plan')", 8000, 'one click starts the remote job and shows a download estimate');
     check.equal(launches, 1);
     check.equal(await js("!!document.getElementById('guide')"), true, 'the guide opens once the setup steps hand over to the workspace');
+    await waitFor("/opencv_python_headless/.test(document.getElementById('setup-activity')?.textContent) && /780 MB · 500 KB\\/s · 刚刚有进展/.test(document.getElementById('setup-activity').textContent) && /本阶段已进行 10 分钟/.test(document.querySelector('.setup-elapsed')?.textContent)", 8000, 'what the installer is fetching, how fast and for how long');
+    check.equal(await js("!!document.querySelector('#autodl-setup [role=alert]')"), false);
+    stalled = 400;
+    await waitFor("/已经 6 分钟没有任何进展/.test(document.querySelector('#autodl-setup [role=alert]')?.textContent)", 12000, 'a stalled install says so and how to stop paying');
     await click('#nav-guide');
     check.ok(!fs.readFileSync(configFile, 'utf8').includes(samplePassword));
     check.ok(!fs.readFileSync(configFile, 'utf8').includes(sampleKey));

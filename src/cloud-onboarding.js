@@ -8,9 +8,15 @@ const { Client, utils } = require('ssh2');
 const { sshExecutable, commandArgs, explainSsh } = require('./remote-servers');
 
 const exec = promisify(execFile);
+// The only pages the renderer may open; the in-app guide links to these.
 const LINKS = Object.freeze({
   instance: 'https://www.autodl.com/console/instance/list',
   deepseek: 'https://platform.deepseek.com/api_keys',
+  autodl: 'https://www.autodl.com/',
+  recharge: 'https://www.autodl.com/recharge',
+  comfyui: 'https://github.com/comfyanonymous/ComfyUI/releases/tag/v0.37.0',
+  pluginsDoc: 'https://github.com/ZiliCai/Black-theatre-open/tree/main/comfyui-plugins',
+  modelsDoc: 'https://github.com/ZiliCai/Black-theatre-open/blob/main/docs/%E6%A8%A1%E5%9E%8B%E4%B8%8B%E8%BD%BD.md',
 });
 const DEEPSEEK = { baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' };
 

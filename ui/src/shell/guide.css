@@ -1,5 +1,5 @@
 /* The guide sits in its own column to the right of every page. */
-.app.with-guide { grid-template-columns: var(--nav-w) 1fr var(--guide-w, 320px); }
+.app.with-guide { grid-template-columns: var(--nav-w) 1fr var(--guide-w, 340px); }
 .app > .guide { grid-row: 3; grid-column: 3; min-height: 0; }
 .guide { display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
 .g-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2) var(--s4); }
@@ -8,8 +8,8 @@
 .g-head .muted { color: var(--dim); font-size: var(--fs-xs); }
 .g-progress { margin: 0 var(--s4) var(--s2); width: auto; height: 4px; accent-color: var(--acc); }
 .g-steps { list-style: none; margin: 0; padding: 0 var(--s2) var(--s4); overflow: auto; flex: 1; }
-.g-steps > li { border-radius: var(--r3); }
-.g-steps > li.open { background: var(--panel-2); }
+.g-steps > li.g-step { border-radius: var(--r3); }
+.g-steps > li.g-step.open { background: var(--panel-2); }
 .g-title { width: 100%; display: flex; align-items: center; gap: var(--s2); padding: 9px var(--s2); border-radius: var(--r3);
   color: var(--sub); font-size: var(--fs-sm); text-align: left; }
 .g-title:hover { color: var(--text); }
@@ -25,9 +25,27 @@
 .g-steps > li.done:not(.open) .t { color: var(--dim); }
 .g-body { padding: 0 var(--s3) var(--s3) 38px; display: grid; gap: var(--s2); font-size: var(--fs-sm); line-height: 1.7; }
 .g-goal { margin: 0; color: var(--sub); }
-.g-items { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; color: var(--sub); }
-.g-items li::marker { color: var(--dim); }
+.g-items { display: grid; gap: var(--s2); color: var(--sub); }
+.g-item { margin: 0; padding-left: 12px; position: relative; }
+.g-item::before { content: ''; position: absolute; left: 0; top: .75em; width: 4px; height: 4px; border-radius: 50%; background: var(--dim); }
+/* Red numbers match the marks drawn on the AutoDL screenshots. */
+.g-num { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; margin: 0 2px; border-radius: 9px;
+  background: #e5262a; color: #fff; font-size: 11px; font-weight: 700; line-height: 1; vertical-align: 1px; }
+.g-shot { display: block; width: 100%; padding: 0; border: 1px solid var(--line); border-radius: var(--r2); overflow: hidden;
+  background: #fff; cursor: zoom-in; }
+.g-shot:hover { border-color: var(--acc); }
+.g-shot img { display: block; width: 100%; height: auto; }
+.g-zoom { position: fixed; inset: 0; z-index: 100; background: rgba(0, 0, 0, .78); display: grid; place-items: center;
+  align-content: center; gap: var(--s2); padding: var(--s6); cursor: zoom-out; }
+.g-zoom img { max-width: min(1400px, 100%); max-height: calc(100vh - 2 * var(--s6) - 24px); border-radius: var(--r3); background: #fff; }
+.g-zoom span { color: rgba(255, 255, 255, .7); font-size: var(--fs-sm); }
 .g-tip { margin: 0; padding: 6px var(--s2); border-left: 2px solid var(--line); color: var(--dim); }
 .g-ui { font-weight: 600; color: var(--text); }
 .g-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .g-mark { margin-left: auto; }
+.g-route { display: grid; gap: 6px; padding: 0 var(--s4) var(--s3); border-bottom: 1px solid var(--line); }
+.g-route > span { color: var(--dim); font-size: var(--fs-xs); }
+.g-part { list-style: none; padding: var(--s4) var(--s2) var(--s1); color: var(--dim); font-size: var(--fs-xs); font-weight: 600; letter-spacing: .5px; }
+.g-warn { margin: 0; display: flex; gap: 6px; align-items: flex-start; padding: 6px var(--s2); border-radius: var(--r2);
+  background: color-mix(in srgb, var(--acc) 10%, transparent); color: var(--text); }
+.g-warn svg { flex-shrink: 0; margin-top: 4px; color: var(--acc); }

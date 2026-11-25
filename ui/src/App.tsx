@@ -11,7 +11,7 @@ import { GalleryPage } from './pages/gallery/GalleryPage';
 import { ScriptPage } from './pages/script/ScriptPage';
 import { SettingsPage } from './pages/settings/SettingsPage';
 import { Onboarding, type OnboardingExit } from './pages/settings/Onboarding';
-import { Guide, readGuide, saveGuide } from './shell/Guide';
+import { Guide, readGuide, saveGuide, type GuideSaved } from './shell/Guide';
 import './shell/shell.css';
 
 const ScenePage = lazy(() => import('./pages/scene/ScenePage').then(({ ScenePage }) => ({ default: ScenePage })));
@@ -48,8 +48,8 @@ export function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [onboarding, setOnboarding] = useState(false);
   // The guide opens by itself the first time; after that it stays as the user left it.
-  const [guide, setGuide] = useState(() => readGuide() ?? { open: true, done: [] });
-  const updateGuide = useCallback((change: Partial<{ open: boolean; done: string[] }>) => {
+  const [guide, setGuide] = useState<GuideSaved>(() => readGuide() ?? { open: true, done: [], route: 'cloud' });
+  const updateGuide = useCallback((change: Partial<GuideSaved>) => {
     setGuide((g) => { const next = { ...g, ...change }; saveGuide(next); return next; });
   }, []);
   const [status, setStatus] = useState<Status | null>(null);
@@ -112,7 +112,7 @@ export function App() {
 
   const leaveOnboarding = useCallback((to: OnboardingExit) => {
     setOnboarding(false);
-    updateGuide({ open: true });
+    updateGuide(to === 'general' ? { open: true, route: 'local' } : { open: true });
     if (to) { setPage('settings'); setSettingsTab(to); }
   }, [updateGuide]);
 
@@ -138,7 +138,7 @@ export function App() {
             : page === 'settings' ? <SettingsPage />
             : <AssetsPage />}
         </main>
-        {guide.open && <Guide page={page} done={guide.done} setDone={(done) => updateGuide({ done })} onClose={() => updateGuide({ open: false })} />}
+        {guide.open && <Guide page={page} saved={guide} update={updateGuide} />}
       </div>
     </AppContext.Provider>
   );
