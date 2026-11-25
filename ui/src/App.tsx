@@ -1,4 +1,4 @@
-import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { api, type Loose, type QueueSnapshot, type Status } from './api';
 import { Button, EmptyState, useToast } from './components';
 import { AppContext, type AppState, type PageId, type SettingsTab } from './shell/context';
@@ -120,7 +120,8 @@ export function App() {
   if (onboarding) return <Onboarding mode="first-run" onClose={leaveOnboarding} />;
   return (
     <AppContext.Provider value={state}>
-      <div className={guide.open ? 'app with-guide' : 'app'}>
+      <div className={guide.open ? 'app with-guide' : 'app'}
+        style={guide.open && guide.width ? { '--guide-w': `${guide.width}px` } as CSSProperties : undefined}>
         <TopBar setSlots={setSlots} />
         <div className="banner-wrap" style={{ gridColumn: '1 / -1' }}><AlertBanner /><PendingBanner /></div>
         <NavRail page={page} guide={guide.open} onGuide={() => updateGuide({ open: !guide.open })} />

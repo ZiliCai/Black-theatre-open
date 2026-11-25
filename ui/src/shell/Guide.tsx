@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { api } from '../api';
 import { Button, Icon, Segmented } from '../components';
 import { useApp, type PageId } from './context';
@@ -6,13 +6,22 @@ import { GUIDE, type GuideItem, type Route } from './guideSteps';
 import './guide.css';
 
 const KEY = 'blackbox.guide';
-export type GuideSaved = { open: boolean; done: string[]; route: Route };
+// width: pixels the user dragged or toggled to; absent means the default, which follows the window.
+export type GuideSaved = { open: boolean; done: string[]; route: Route; width?: number };
+
+export const GUIDE_MIN = 300;
+const WIDE = 600;
+// Keep at least this much room for the page next to the guide.
+const PAGE_ROOM = 480;
+export const guideMax = () => Math.max(GUIDE_MIN, Math.min(1100, window.innerWidth - 56 - PAGE_ROOM));
+const clampWidth = (w: number) => Math.round(Math.min(guideMax(), Math.max(GUIDE_MIN, w)));
 
 export function readGuide(): GuideSaved | null {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
     if (saved && typeof saved.open === 'boolean' && Array.isArray(saved.done)) {
-      return { open: saved.open, done: saved.done, route: saved.route === 'local' ? 'local' : 'cloud' };
+      const width = typeof saved.width === 'number' && saved.width >= GUIDE_MIN ? saved.width : undefined;
+      return { open: saved.open, done: saved.done, route: saved.route === 'local' ? 'local' : 'cloud', width };
     }
   } catch { /* storage unavailable or damaged: start fresh */ }
   return null;
@@ -65,6 +74,35 @@ export function Guide({ page, saved, update }: {
   const { done, route } = saved;
   const [keySet, setKeySet] = useState(false);
   const [zoomed, setZoomed] = useState<{ src: string; alt: string } | null>(null);
+  const panel = useRef<HTMLElement>(null);
+  const [dragging, setDragging] = useState(false);
+
+  // Drag the left edge: the column follows the pointer live, the width is saved on release.
+  function startResize(e: ReactPointerEvent<HTMLDivElement>) {
+    const app = panel.current?.closest('.app') as HTMLElement | null;
+    if (!app || !panel.current) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    try { handle.setPointerCapture(e.pointerId); } catch { /* synthetic pointers have no capture; moves still reach the handle */ }
+    const startX = e.clientX, startWidth = panel.current.getBoundingClientRect().width;
+    let width = startWidth;
+    setDragging(true);
+    const move = (ev: PointerEvent) => {
+      width = clampWidth(startWidth + startX - ev.clientX);
+      app.style.setProperty('--guide-w', width + 'px');
+    };
+    const up = () => {
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      setDragging(false);
+      update({ width });
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  }
+  const wide = (saved.width ?? panel.current?.getBoundingClientRect().width ?? 0) >= WIDE - 20;
   // Re-read on every page change: the key is usually filled in on the settings page.
   useEffect(() => {
     let live = true;
@@ -99,10 +137,16 @@ export function Guide({ page, saved, update }: {
     setExpanded(GUIDE.find((s) => (!s.route || s.route === next) && !isDone(s.id))?.id ?? null);
   }
 
-  return <aside className="guide" id="guide" aria-label="使用指南">
+  return <aside className={dragging ? 'guide resizing' : 'guide'} id="guide" aria-label="使用指南" ref={panel}>
+    <div className="g-resize" role="separator" aria-orientation="vertical" aria-label="调整指南宽度"
+      title="拖动调整宽度，双击恢复默认" onPointerDown={startResize} onDoubleClick={() => update({ width: undefined })} />
     <header className="g-head">
       <div><strong>使用指南</strong><span className="muted">{count === steps.length ? '全部完成' : `已完成 ${count} / ${steps.length}`}</span></div>
-      <Button variant="ghost" size="sm" aria-label="收起指南" title="收起指南，左侧「指南」可再打开" onClick={() => update({ open: false })}><Icon name="x" /></Button>
+      <div className="g-head-actions">
+        <Button variant="ghost" size="sm" id="guide-wide" aria-pressed={wide} title={wide ? '恢复默认宽度' : '放宽指南，截图看得更清楚'}
+          onClick={() => update({ width: wide ? undefined : clampWidth(WIDE) })}><Icon name="expand" />{wide ? '收窄' : '放宽'}</Button>
+        <Button variant="ghost" size="sm" aria-label="收起指南" title="收起指南，左侧「指南」可再打开" onClick={() => update({ open: false })}><Icon name="x" /></Button>
+      </div>
     </header>
     <progress className="g-progress" max={steps.length} value={count} aria-label="指南完成进度" />
     <div className="g-route">

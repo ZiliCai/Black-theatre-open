@@ -307,6 +307,24 @@ async function runSmoke(h) {
     await click('#guide-script .g-mark');
     await waitFor("document.getElementById('guide-script').classList.contains('done') && document.getElementById('guide-breakdown').classList.contains('open')", 3000, 'marking a step done opens the next one');
     await shot('guide');
+    // ---- the guide can be widened: the toggle, a drag on its left edge, double-click back to the default ----
+    const guideWidth = () => js("Math.round(document.getElementById('guide').getBoundingClientRect().width)");
+    const saved = () => js("JSON.parse(localStorage.getItem('blackbox.guide')).width ?? null");
+    const defaultWidth = await guideWidth();
+    await click('#guide-wide');
+    await waitFor("Math.round(document.getElementById('guide').getBoundingClientRect().width) === 600", 3000, 'the wide toggle sets 600px');
+    if ((await saved()) !== 600) return fail('the wide guide width should be remembered');
+    await shot('guide-wide');
+    await js(`(() => {
+      const h = document.querySelector('#guide .g-resize'); const r = h.getBoundingClientRect(); const y = r.top + 200;
+      const ev = (type, x) => h.dispatchEvent(new PointerEvent(type, { bubbles: true, pointerId: 7, clientX: x, clientY: y, button: 0 }));
+      ev('pointerdown', r.left + 3); ev('pointermove', r.left - 97); ev('pointerup', r.left - 97);
+    })()`);
+    await waitFor("Math.round(document.getElementById('guide').getBoundingClientRect().width) === 700", 3000, 'dragging the left edge 100px widens the guide by 100px');
+    if ((await saved()) !== 700) return fail('the dragged guide width should be remembered');
+    await js("document.querySelector('#guide .g-resize').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))");
+    await waitFor(`Math.round(document.getElementById('guide').getBoundingClientRect().width) === ${defaultWidth}`, 3000, 'double-click restores the default width');
+    if ((await saved()) !== null) return fail('the default width should not be stored');
     await click('#nav-guide');
     await waitFor("!document.getElementById('guide') && JSON.parse(localStorage.getItem('blackbox.guide')).open === false", 3000, 'the guide closes and remembers it');
 

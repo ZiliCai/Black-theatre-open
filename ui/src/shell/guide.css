@@ -1,7 +1,14 @@
 /* The guide sits in its own column to the right of every page. */
-.app.with-guide { grid-template-columns: var(--nav-w) 1fr var(--guide-w, 340px); }
+/* Without a width the user chose, the guide grows with the window; the page always keeps 480px. */
+.app.with-guide { grid-template-columns: var(--nav-w) minmax(0, 1fr)
+  min(var(--guide-w, clamp(340px, 26vw, 520px)), max(300px, calc(100vw - var(--nav-w) - 480px))); }
 .app > .guide { grid-row: 3; grid-column: 3; min-height: 0; }
-.guide { display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
+.guide { position: relative; display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
+/* The left edge is a drag handle; a wider hit area than the 1px border, highlighted on hover. */
+.g-resize { position: absolute; left: 0; top: 0; bottom: 0; width: 7px; z-index: 2; cursor: col-resize; touch-action: none; }
+.g-resize:hover, .guide.resizing .g-resize { background: color-mix(in srgb, var(--acc) 45%, transparent); }
+.guide.resizing { user-select: none; }
+.g-head-actions { display: flex; align-items: center; gap: 2px; }
 .g-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2) var(--s4); }
 .g-head > div { display: flex; align-items: baseline; gap: var(--s2); }
 .g-head strong { font-size: var(--fs-md); }
