@@ -21,6 +21,7 @@ const PATHS: Record<string, string> = {
   copy: 'M8 8h12v12H8zM4 16V4h12',
   sparkle: 'M12 3v6M12 15v6M3 12h6M15 12h6M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3',
   building: 'M4 21V5l8-3 8 3v16M2 21h20M10 21v-4h4v4M8 8h2M14 8h2M8 12h2M14 12h2',
+  book: 'M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5zM5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3M9 7h6M9 10.5h6',
   expand: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5M9 9l-5-5M15 9l5-5M9 15l-5 5M15 15l5 5',
 };
 

@@ -283,6 +283,19 @@ async function runSmoke(h) {
     await shot('shell-comfy-menu');
     await click('#comfy-status');
 
+    // ---- the guide: open on first start, follows the user to each page, closing sticks ----
+    await waitFor("!!document.getElementById('guide')", 3000, 'the guide on first start');
+    await waitFor("document.getElementById('guide-project')?.classList.contains('done')", 3000, 'an active project ticks the project step');
+    await click('#nav-shots');
+    await click('#guide-script .g-title');
+    await js("[...document.querySelectorAll('#guide-script .g-actions button')].find((b) => b.textContent === '去剧本页').click()");
+    await waitFor("!!document.getElementById('page-script')", 3000, 'the guide takes the user to the page of a step');
+    await click('#guide-script .g-mark');
+    await waitFor("document.getElementById('guide-script').classList.contains('done') && document.getElementById('guide-breakdown').classList.contains('open')", 3000, 'marking a step done opens the next one');
+    await shot('guide');
+    await click('#nav-guide');
+    await waitFor("!document.getElementById('guide') && JSON.parse(localStorage.getItem('blackbox.guide')).open === false", 3000, 'the guide closes and remembers it');
+
     // ---- error banner from a real crash log ----
     h.ingestLog(fs.readFileSync(path.join(FIXTURES, 'log-crash.txt'), 'utf8'));
     h.ingestLog('');
@@ -810,6 +823,8 @@ async function runSmoke(h) {
     await click('#welcome-install');
     await waitFor("document.querySelector('.setup-progress')?.textContent.includes('25%') && !!document.querySelector('.shutdown-plan')", 8000, 'one click starts the remote job and shows a download estimate');
     check.equal(launches, 1);
+    check.equal(await js("!!document.getElementById('guide')"), true, 'the guide opens once the setup steps hand over to the workspace');
+    await click('#nav-guide');
     check.ok(!fs.readFileSync(configFile, 'utf8').includes(samplePassword));
     check.ok(!fs.readFileSync(configFile, 'utf8').includes(sampleKey));
     await shot('cloud-download');

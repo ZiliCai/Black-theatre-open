@@ -2,7 +2,7 @@
 
 用 AI 做短剧的 Windows 桌面软件：写剧本、做人物和场景素材、按镜头出视频、挑片、连起来看。出片用的是 [ComfyUI](https://github.com/comfyanonymous/ComfyUI) 加 MiniMax H3 视频模型，可以在本机显卡上跑，也可以放到租的云 GPU（比如 AutoDL）上跑。
 
-> Windows x64 提供独立安装包，内置桌面运行时和 SSH 客户端。首次启动会打开 AutoDL 和 DeepSeek 配置向导。
+> Windows x64 提供独立安装包，内置桌面运行时和 SSH 客户端。首次启动会打开 AutoDL 和 DeepSeek 配置向导；之后右侧的「使用指南」从准备显卡、写剧本、拆分镜一直带到出片和关机，左侧「指南」可以随时收起或打开。
 
 ## 能做什么
 

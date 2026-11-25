@@ -11,6 +11,7 @@ import { GalleryPage } from './pages/gallery/GalleryPage';
 import { ScriptPage } from './pages/script/ScriptPage';
 import { SettingsPage } from './pages/settings/SettingsPage';
 import { Onboarding, type OnboardingExit } from './pages/settings/Onboarding';
+import { Guide, readGuide, saveGuide } from './shell/Guide';
 import './shell/shell.css';
 
 const ScenePage = lazy(() => import('./pages/scene/ScenePage').then(({ ScenePage }) => ({ default: ScenePage })));
@@ -46,6 +47,11 @@ export function App() {
   const [page, setPage] = useState<PageId>(readPage);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
   const [onboarding, setOnboarding] = useState(false);
+  // The guide opens by itself the first time; after that it stays as the user left it.
+  const [guide, setGuide] = useState(() => readGuide() ?? { open: true, done: [] });
+  const updateGuide = useCallback((change: Partial<{ open: boolean; done: string[] }>) => {
+    setGuide((g) => { const next = { ...g, ...change }; saveGuide(next); return next; });
+  }, []);
   const [status, setStatus] = useState<Status | null>(null);
   const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
   const [projects, setProjects] = useState<Loose[]>([]);
@@ -106,17 +112,18 @@ export function App() {
 
   const leaveOnboarding = useCallback((to: OnboardingExit) => {
     setOnboarding(false);
+    updateGuide({ open: true });
     if (to) { setPage('settings'); setSettingsTab(to); }
-  }, []);
+  }, [updateGuide]);
 
   if (initializing) return null;
   if (onboarding) return <Onboarding mode="first-run" onClose={leaveOnboarding} />;
   return (
     <AppContext.Provider value={state}>
-      <div className="app">
+      <div className={guide.open ? 'app with-guide' : 'app'}>
         <TopBar setSlots={setSlots} />
         <div className="banner-wrap" style={{ gridColumn: '1 / -1' }}><AlertBanner /><PendingBanner /></div>
-        <NavRail page={page} />
+        <NavRail page={page} guide={guide.open} onGuide={() => updateGuide({ open: !guide.open })} />
         <main className="page" id={`page-${page}`} key={page}>
           {page === 'shots' ? <ShotsPage />
             : page === 'gallery' ? <GalleryPage />
@@ -131,6 +138,7 @@ export function App() {
             : page === 'settings' ? <SettingsPage />
             : <AssetsPage />}
         </main>
+        {guide.open && <Guide page={page} done={guide.done} setDone={(done) => updateGuide({ done })} onClose={() => updateGuide({ open: false })} />}
       </div>
     </AppContext.Provider>
   );

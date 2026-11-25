@@ -1,0 +1,33 @@
+/* The guide sits in its own column to the right of every page. */
+.app.with-guide { grid-template-columns: var(--nav-w) 1fr var(--guide-w, 320px); }
+.app > .guide { grid-row: 3; grid-column: 3; min-height: 0; }
+.guide { display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); overflow: hidden; }
+.g-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2) var(--s4); }
+.g-head > div { display: flex; align-items: baseline; gap: var(--s2); }
+.g-head strong { font-size: var(--fs-md); }
+.g-head .muted { color: var(--dim); font-size: var(--fs-xs); }
+.g-progress { margin: 0 var(--s4) var(--s2); width: auto; height: 4px; accent-color: var(--acc); }
+.g-steps { list-style: none; margin: 0; padding: 0 var(--s2) var(--s4); overflow: auto; flex: 1; }
+.g-steps > li { border-radius: var(--r3); }
+.g-steps > li.open { background: var(--panel-2); }
+.g-title { width: 100%; display: flex; align-items: center; gap: var(--s2); padding: 9px var(--s2); border-radius: var(--r3);
+  color: var(--sub); font-size: var(--fs-sm); text-align: left; }
+.g-title:hover { color: var(--text); }
+.g-title .t { flex: 1; }
+.g-title .tag { padding: 0 6px; border-radius: var(--r1); border: 1px solid var(--line); color: var(--dim); font-size: var(--fs-xs); }
+.g-title > svg { color: var(--dim); transform: rotate(-90deg); transition: transform .15s; }
+.g-steps > li.open .g-title { color: var(--text); font-weight: 600; }
+.g-steps > li.open .g-title > svg { transform: none; }
+.g-title .n { width: 20px; height: 20px; flex-shrink: 0; border-radius: 50%; display: grid; place-items: center;
+  border: 1px solid var(--line); font-size: var(--fs-xs); font-weight: 400; }
+.g-steps > li.open:not(.done) .n { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
+.g-steps > li.done .n { border-color: var(--good); color: var(--good); }
+.g-steps > li.done:not(.open) .t { color: var(--dim); }
+.g-body { padding: 0 var(--s3) var(--s3) 38px; display: grid; gap: var(--s2); font-size: var(--fs-sm); line-height: 1.7; }
+.g-goal { margin: 0; color: var(--sub); }
+.g-items { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; color: var(--sub); }
+.g-items li::marker { color: var(--dim); }
+.g-tip { margin: 0; padding: 6px var(--s2); border-left: 2px solid var(--line); color: var(--dim); }
+.g-ui { font-weight: 600; color: var(--text); }
+.g-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.g-mark { margin-left: auto; }

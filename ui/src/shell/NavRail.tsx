@@ -9,7 +9,7 @@ const MAIN: { id: PageId; label: string; icon: IconName }[] = [
   { id: 'gallery', label: '成片', icon: 'box' },
 ];
 
-export function NavRail({ page }: { page: PageId }) {
+export function NavRail({ page, guide, onGuide }: { page: PageId; guide: boolean; onGuide: () => void }) {
   const { go } = useApp();
   const item = (p: { id: PageId; label: string; icon: IconName }) => (
     <button key={p.id} id={`nav-${p.id}`} className={page === p.id ? 'on' : ''} onClick={() => go(p.id)} aria-current={page === p.id}>
@@ -20,6 +20,9 @@ export function NavRail({ page }: { page: PageId }) {
     <nav className="nav">
       {MAIN.map(item)}
       <div className="grow" />
+      <button id="nav-guide" className={guide ? 'on' : ''} aria-pressed={guide} title={guide ? '收起使用指南' : '打开使用指南'} onClick={onGuide}>
+        <Icon name="book" size={18} />指南
+      </button>
       {item({ id: 'settings', label: '设置', icon: 'gear' })}
     </nav>
   );

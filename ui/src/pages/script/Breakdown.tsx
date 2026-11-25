@@ -195,7 +195,7 @@ export function Breakdown({ onClose, onDocsChanged }: { onClose: () => void; onD
       <>
         <p>{phase === 'failed' ? '拆分没有完成：' : '上次拆分到一半被中断了（软件关掉了）。'}</p>
         {state.error ? <p className="bd-bad">{state.error}</p> : null}
-        <p className="bd-dim">AI 接口没配好时，先到 设置 → AI 里填好再来。</p>
+        <p className="bd-dim">AI 接口没配好时，先到「设置 → 常规」的 DeepSeek / 大模型里填好再来。</p>
       </>
     );
     actions = <>
