@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import ranges
@@ -11,6 +12,9 @@ import ranges
 GIB = 1024 ** 3
 FP4 = 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'
 INT8 = 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors'
+# Pauses before going round every source again. When all of them fail together the instance's
+# own network is usually down for a few minutes; finished chunks are kept meanwhile.
+PAUSES = (60, 180, 300)
 
 
 def digest(path):
@@ -96,21 +100,25 @@ def download(dest, spec, notify):
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + '.part')
     if spec['bytes'] >= 2 * ranges.CHUNK:
-        for url in spec['urls']:
-            try:
-                ranges.transfer(part, spec, url, notify)
-            except (OSError, ValueError) as exc:
-                print(f'分段下载换源：{type(exc).__name__}: {str(exc)[:300]}', flush=True)
-                continue
-            if matches(part, spec):
-                notify(spec['bytes'])
-                os.replace(part, dest)
+        for pause in (0, *PAUSES):
+            if pause:
+                print(f'所有下载源暂时都连不上，{pause} 秒后再试一轮（已完成的分段保留）', flush=True)
+                time.sleep(pause)
+            for url in spec['urls']:
+                try:
+                    ranges.transfer(part, spec, url, notify)
+                except (OSError, ValueError) as exc:
+                    print(f'分段下载换源：{type(exc).__name__}: {str(exc)[:300]}', flush=True)
+                    continue
+                if matches(part, spec):
+                    notify(spec['bytes'])
+                    os.replace(part, dest)
+                    ranges.journal(part).unlink(missing_ok=True)
+                    remember(dest, spec)
+                    return
+                part.unlink(missing_ok=True)
+                notify(0)
                 ranges.journal(part).unlink(missing_ok=True)
-                remember(dest, spec)
-                return
-            part.unlink(missing_ok=True)
-            notify(0)
-            ranges.journal(part).unlink(missing_ok=True)
         ranges.contiguous(part, spec)
     for url in spec['urls']:
         # A truncated transfer is resumable even from another mirror of this digest.

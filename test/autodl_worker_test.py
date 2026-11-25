@@ -61,6 +61,21 @@ class ModelInstallTest(unittest.TestCase):
         self.assertEqual(dest.read_bytes(), self.content)
         self.assertFalse(part.exists())
 
+    def test_all_sources_down_waits_and_tries_again(self):
+        url, _ = self.server()
+        dest = self.root / 'weights.bin'
+        self.spec['urls'] = [url]
+        real, calls = ranges.transfer, []
+        def flaky(*args):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError('该源未能提供完整分段：ReadTimeout')
+            return real(*args)
+        with patch.object(ranges, 'transfer', flaky), patch.object(models, 'PAUSES', (0.01,)):
+            models.download(dest, self.spec, lambda _: None)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(dest.read_bytes(), self.content)
+
     def test_failed_sources_preserve_sparse_resume_map(self):
         part = self.root / 'model.part'
         part.write_bytes(self.content)
