@@ -5,6 +5,11 @@ const path = require('node:path');
 // The Windows distribution carries the client alongside its app archive; source runs use the system ssh.
 const sshExecutable = process.platform === 'win32' && process.resourcesPath && !process.defaultApp
   ? path.join(process.resourcesPath, 'openssh', 'ssh.exe') : 'ssh';
+// ssh.exe missing or refused to start. For the bundled copy that is almost always antivirus software
+// quarantining or blocking it, and installing Windows' own OpenSSH would not help: the app never runs it.
+// Node's error codes are matched case-sensitively, so ssh's own "Unknown option" is not one.
+const NO_SSH = /not recognized|not found|contains a virus/i;
+const NO_SSH_CODE = /\b(ENOENT|EACCES|EPERM)\b|spawn UNKNOWN|^\s*UNKNOWN\b/;
 
 const NAME_PART = /^[A-Za-z0-9._-]+$/;
 // a host name or address that ssh cannot mistake for an option
@@ -81,7 +86,7 @@ function commandArgs(server, command) {
 }
 
 // What went wrong, from ssh's error output, in words the user can act on.
-function explainSsh(stderr) {
+function explainSsh(stderr, bundled = sshExecutable !== 'ssh') {
   const text = String(stderr || '');
   if (/Permission denied/i.test(text)) return { kind: 'auth', message: '服务器不认这把钥匙：先把钥匙登记到服务器（~/.ssh/authorized_keys），或者在设置里换一把钥匙' };
   if (/Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(text)) {
@@ -91,7 +96,11 @@ function explainSsh(stderr) {
     return { kind: 'unreachable', message: '连不上服务器：实例可能没开机（到期会自动关机），或者地址、端口不对' };
   }
   if (/Address already in use|cannot listen|Could not request local forwarding/i.test(text)) return { kind: 'port', message: '本机端口被占用，正在换一个端口重试' };
-  if (/not recognized|ENOENT|not found/i.test(text)) return { kind: 'nossh', message: '这台电脑上找不到 ssh：请在 Windows 设置 → 可选功能里装上“OpenSSH 客户端”' };
+  if (NO_SSH.test(text) || NO_SSH_CODE.test(text)) {
+    return { kind: 'nossh', message: bundled
+      ? '软件自带的 SSH 程序打不开，多半是被杀毒软件拦截或隔离了：到杀毒软件的隔离区或拦截记录里恢复 ssh.exe，并把黑箱剧场加入信任；还不行就重新安装黑箱剧场'
+      : '这台电脑上找不到 ssh：请在 Windows 设置 → 可选功能里装上“OpenSSH 客户端”' };
+  }
   const last = text.trim().split(/\r?\n/).filter(Boolean).pop();
   return { kind: 'error', message: last ? `SSH 出错:${last}` : 'SSH 连接断开了' };
 }

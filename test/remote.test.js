@@ -66,6 +66,19 @@ test('ssh errors become something the user can act on', () => {
   assert.equal(explainSsh('').kind, 'error');
 });
 
+test('a bundled ssh.exe that is gone or blocked points at antivirus software, not Windows OpenSSH', () => {
+  const gone = explainSsh('\nENOENT spawn C:\\Apps\\resources\\openssh\\ssh.exe ENOENT', true);
+  assert.equal(gone.kind, 'nossh');
+  assert.match(gone.message, /杀毒软件/);
+  assert.doesNotMatch(gone.message, /可选功能/);
+  for (const blocked of ['UNKNOWN', 'EACCES', '\nUNKNOWN spawn UNKNOWN', 'Operation did not complete successfully because the file contains a virus']) {
+    assert.equal(explainSsh(blocked, true).kind, 'nossh', blocked);
+  }
+  // Running from source uses the system ssh, which the user can install.
+  assert.match(explainSsh('ENOENT', false).message, /可选功能/);
+  assert.equal(explainSsh('Unknown option -- z', true).kind, 'error');
+});
+
 // ---------- files and model names ----------
 const graph = () => ({
   1: { class_type: 'LoadImageOutput', inputs: { image: 'ref/YS-YK_前方的路.png [output]' } },
