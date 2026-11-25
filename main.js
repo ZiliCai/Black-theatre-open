@@ -658,7 +658,7 @@ function registerIpc() {
     }
     return true;
   });
-  ipcMain.handle('cloud:install', async (_e, { login, password, apiKey, profile } = {}) => {
+  ipcMain.handle('cloud:install', async (_e, { login, password, apiKey, profile, modelsOnly } = {}) => {
     if (welcomeMessage) return { ok: false, message: '首次配置正在进行中。' };
     try {
       const busy = queueBlocksSwitch();
@@ -677,7 +677,7 @@ function registerIpc() {
       const server = normalizeServer({ id: 'srv-' + crypto.randomUUID(), name: 'AutoDL · ' + endpoint.host,
         comfyPort: 8188, ...existing, ...loginServer });
       const servers = [...config.servers.filter((s) => s.id !== server.id), server];
-      const setupWatch = { id: server.id, profile, upscale: false, pending: true, requiresChat: true, endpoint: selfcheck.endpoint(server) };
+      const setupWatch = { id: server.id, profile, upscale: false, modelsOnly: modelsOnly === true, pending: true, requiresChat: true, endpoint: selfcheck.endpoint(server) };
       setLlmSecret(key);
       saveRemote({ servers, target: server.id, llm: { ...config.llm, ...llm }, cloudWelcome: 'pending' });
       welcomeMessage = '正在上传安装包并启动云端自检…';
@@ -690,14 +690,14 @@ function registerIpc() {
     } catch (e) { return { ok: false, message: e.message }; }
     finally { welcomeMessage = ''; }
   });
-  ipcMain.handle('autodl:start', async (_e, { id, profile, upscale } = {}) => {
+  ipcMain.handle('autodl:start', async (_e, { id, profile, upscale, modelsOnly } = {}) => {
     try {
       const server = selectedServer(id);
       const busy = queueBlocksSwitch();
       if (busy) return busy;
       if (welcomeMessage) throw new Error('首次配置正在启动，请稍候。');
-      await autodl.launch(server, workflowRoot, { profile, upscale: upscale === true });
-      applyConfig({ setupWatch: { id, profile, upscale: upscale === true, pending: true, endpoint: selfcheck.endpoint(server) } });
+      await autodl.launch(server, workflowRoot, { profile, upscale: upscale === true, modelsOnly: modelsOnly === true });
+      applyConfig({ setupWatch: { id, profile, upscale: upscale === true, modelsOnly: modelsOnly === true, pending: true, endpoint: selfcheck.endpoint(server) } });
       saveConfig(configFile, config);
       return { ok: true };
     } catch (error) { return { ok: false, message: error.message }; }
@@ -726,9 +726,10 @@ function registerIpc() {
       return { status: 'attention', phase: 'selfcheck', historical: true, video: cached.preview.endsWith('.mp4'), report: cached,
         message: '当前无法连接实例。以下为上次自检记录，开机并连接后可以重新自检。' };
     }
-    const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, video: s.video };
+    const view = { status: s.status, phase: s.phase, message: s.message, gpu: s.gpu, space: s.space, download: s.download, video: s.video, modelsOnly: s.modelsOnly === true };
     if (s.status !== 'ready') {
-      if (s.status === 'failed' && watch?.pending && config.setupWatch === watch) {
+      // A GPU-less download run ends here; acceptance needs a second run after a GPU boot.
+      if ((s.status === 'failed' || s.status === 'downloaded') && watch?.pending && config.setupWatch === watch) {
         applyConfig({ setupWatch: { ...watch, pending: false } });
         saveConfig(configFile, config);
       }

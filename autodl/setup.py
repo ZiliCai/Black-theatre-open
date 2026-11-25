@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 from acceptance import Comfy, prepare_graph
-from models import GIB, FP4, INT8, digest, download, ensure_space, inventory, plan
+from models import GIB, FP4, INT8, digest, download, ensure_space, inventory, plan, prefer_fp4
 from service import listening, start
 from progress import DownloadProgress
 
@@ -131,16 +131,32 @@ def execute(root, port, state):
     catalog = json.loads((BUNDLE / 'autodl/models.json').read_text())
     state['video'] = bool(recipe.get('video'))
     state['videoTemplate'] = next((w for w in recipe['workflows'] if w.startswith('minimax-h3-')), None)
-    step('check', '正在检查 GPU、驱动和数据盘')
-    gpu = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,driver_version,compute_cap',
-                                   '--format=csv,noheader,nounits', '--id=0'], text=True).strip()
-    fp4 = float(gpu.split(',')[-1]) >= 10
+    models_only = bool(recipe.get('modelsOnly'))
+    state['modelsOnly'] = models_only
+    modelroot = root / 'models'
+    if models_only:
+        # AutoDL can boot the same data disk without a GPU at a fraction of the price.
+        step('check', '无卡模式：只下载并校验模型，不检查 GPU')
+        fp4 = False
+        state.update(gpu='无卡模式 · 未检查 GPU，文本编码器按 INT8 下载', swaps={})
+    else:
+        step('check', '正在检查 GPU、驱动和数据盘')
+        try:
+            gpu = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,driver_version,compute_cap',
+                                           '--format=csv,noheader,nounits', '--id=0'], text=True,
+                                          stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            gpu = ''
+        if not gpu:
+            raise RuntimeError('未检测到 GPU。实例以无卡模式开机时，请勾选「无卡模式：只下载模型」；'
+                               '要生成验收素材，请到 AutoDL 控制台改用有卡模式开机')
+        fp4 = prefer_fp4(modelroot, float(gpu.split(',')[-1]) >= 10)
+        card, memory, driver, _ = (field.strip() for field in gpu.split(','))
+        state.update(gpu=f'{card} · {int(memory) / 1024:.0f} GiB 显存 · 驱动 {driver}', swaps={} if fp4 or not any(FP4 in x for w in recipe['workflows']
+                     for x in catalog['workflows'][w]) else {FP4: INT8})
     files = inventory(catalog, recipe['workflows'], fp4)
-    card, memory, driver, _ = (field.strip() for field in gpu.split(','))
-    state.update(gpu=f'{card} · {int(memory) / 1024:.0f} GiB 显存 · 驱动 {driver}', swaps={} if fp4 or not any(FP4 in x for w in recipe['workflows']
-                 for x in catalog['workflows'][w]) else {FP4: INT8})
     api = Comfy(port)
-    external_service = listening(port) and not owned_service(root)
+    external_service = not models_only and listening(port) and not owned_service(root)
     if external_service:
         step('check', '检测到该端口已有服务，正在检查它的工作流和模型')
         try:
@@ -149,7 +165,6 @@ def execute(root, port, state):
             raise RuntimeError(f'端口 {port} 已有其他服务。请在远程设置中选择空闲的 ComfyUI 端口。{exc}') from exc
     else:
         # Stage the models independently of the source checkout so disk preflight happens first.
-        modelroot = root / 'models'
         needed, pending = plan(modelroot, files, root.parents[1] / 'ComfyUI/models', lambda msg: step('check', msg))
         reserve = (3 if (root / 'environment.json').is_file() else 14) * GIB
         state['space'] = (f'数据盘可用 {shutil.disk_usage(root).free/GIB:.1f} GiB，'
@@ -172,25 +187,33 @@ def execute(root, port, state):
                     last_write = now
                     state.update(phase='models', message='正在下载并校验模型 · ' + dest.name, download=progress.snapshot())
                     write_json(root / 'state.json', state)
-        step('environment', '正在安装 ComfyUI、GPU 运行库和插件')
+        step('models' if models_only else 'environment',
+             '正在下载并校验模型' if models_only else '正在安装 ComfyUI、GPU 运行库和插件')
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            runtime = pool.submit(install_runtime)
+            runtime = None if models_only else pool.submit(install_runtime)
             remaining = len(pending)
             def get_model(entry):
                 dest, spec = entry
                 download(dest, spec, lambda size: report(dest, size))
             downloads = [pool.submit(get_model, entry) for entry in pending]
             try:
-                for work in concurrent.futures.as_completed([runtime, *downloads]):
+                for work in concurrent.futures.as_completed([*filter(None, [runtime]), *downloads]):
                     work.result()
                     if work is not runtime:
                         remaining -= 1
-                        if not remaining and not runtime.done():
+                        if not remaining and runtime and not runtime.done():
                             step('environment', '模型已校验，正在等待运行环境和插件安装完成')
             except Exception:
                 for work in downloads:
                     work.cancel()
                 raise
+        if models_only:
+            total = sum(spec['bytes'] for spec in files.values()) / GIB
+            state.update(status='downloaded', phase='models', download=progress.snapshot(),
+                         message=f'模型已全部下载并校验（{len(files)} 个文件，{total:.1f} GiB）。'
+                                 '到 AutoDL 控制台关机，改用有卡模式开机后，取消勾选「无卡模式」再点「配置并验收」。')
+            write_json(root / 'state.json', state)
+            return
         step('environment', '模型、运行环境及插件已就绪')
         for folder in {p.split('/')[0] for p in files}:
             target = root / 'ComfyUI/models' / folder

@@ -66,3 +66,11 @@ test('the download list covers every weight referenced by both published Wenwu g
     assert.deepEqual([...new Set(weights)].sort(), [...planned].sort());
   }
 });
+
+test('a GPU-less download run only marks the recipe; the full run stays unmarked', () => {
+  const full = recipe(root, 'wenwu');
+  const download = recipe(root, 'wenwu', false, true);
+  assert.equal(download.modelsOnly, true);
+  assert.equal('modelsOnly' in full, false);
+  assert.deepEqual(download.workflows, full.workflows);
+});

@@ -1,5 +1,6 @@
 """模型放在数据盘。只有通过清单校验的文件才会出现在 ComfyUI 的模型目录。"""
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -30,6 +31,36 @@ def matches(path, spec):
     return path.is_file() and path.stat().st_size == spec['bytes'] and digest(path) == spec['sha256']
 
 
+def _stamp(path):
+    return path.with_name('.' + path.name + '.verified')
+
+
+def remember(path, spec):
+    """Record a verified file so a later run (often on a paid GPU) need not hash 60+ GiB again."""
+    info = path.stat()
+    _stamp(path).write_text(json.dumps([info.st_size, info.st_mtime_ns, spec['sha256']]))
+
+
+def known_good(path, spec):
+    try:
+        info = path.stat()
+        if json.loads(_stamp(path).read_text()) == [info.st_size, info.st_mtime_ns, spec['sha256']]:
+            return True
+    except (OSError, ValueError):
+        pass
+    if matches(path, spec):
+        remember(path, spec)
+        return True
+    return False
+
+
+def prefer_fp4(root, capable):
+    """A GPU-less download run stages the INT8 encoder. Use it instead of fetching FP4 on the paid GPU."""
+    folder = root / 'text_encoders'
+    staged = (folder / INT8).is_file() and not (folder / FP4).exists() and not (folder / (FP4 + '.part')).exists()
+    return capable and not staged
+
+
 def plan(root, models, external, notify):
     needed = 0
     pending = []
@@ -37,13 +68,14 @@ def plan(root, models, external, notify):
         dest = root / name
         notify('核对 ' + dest.name)
         if dest.exists() or dest.is_symlink():
-            if not matches(dest, spec):
+            if not known_good(dest, spec):
                 raise RuntimeError(f'已有文件校验失败，请移开后重试：{dest}')
             continue
         other = external / name
         if matches(other, spec):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.symlink_to(other)
+            remember(dest, spec)
             continue
         part = dest.with_suffix(dest.suffix + '.part')
         partial = ranges.saved_size(part, spec)
@@ -74,6 +106,7 @@ def download(dest, spec, notify):
                 notify(spec['bytes'])
                 os.replace(part, dest)
                 ranges.journal(part).unlink(missing_ok=True)
+                remember(dest, spec)
                 return
             part.unlink(missing_ok=True)
             notify(0)
@@ -104,6 +137,7 @@ def download(dest, spec, notify):
             if matches(part, spec):
                 notify(spec['bytes'])
                 os.replace(part, dest)
+                remember(dest, spec)
                 return
             if part.is_file() and part.stat().st_size >= spec['bytes']:
                 part.unlink()

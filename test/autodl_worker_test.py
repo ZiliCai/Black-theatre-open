@@ -121,3 +121,79 @@ class ModelInstallTest(unittest.TestCase):
         self.assertEqual(out['1']['inputs'], {'clip_name': 'sub/' + models.INT8, 'image': 'ref/generated.png [output]',
                                              'filename_prefix': 'video/bbt_acceptance_id'})
         self.assertEqual(graph['1']['inputs']['clip_name'], models.FP4)
+
+
+try:
+    import setup  # the worker locks with fcntl, so it only imports on Linux and macOS
+except ImportError:
+    setup = None
+
+
+@unittest.skipIf(setup is None, 'the AutoDL worker needs fcntl')
+class ModelsOnlyRunTest(unittest.TestCase):
+    server = ModelInstallTest.server
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        base = Path(folder.name)
+        self.root = base / 'blackbox' / '8188'
+        self.root.mkdir(parents=True)
+        bundle = base / 'bundle'
+        (bundle / 'autodl').mkdir(parents=True)
+        self.content = bytes(range(251)) * 40
+        spec = {'bytes': len(self.content), 'sha256': hashlib.sha256(self.content).hexdigest()}
+        url, _ = self.server()
+        files = {name: {**spec, 'urls': [url]} for name in
+                 ('text_encoders/' + models.INT8, 'text_encoders/' + models.FP4, 'vae/v.safetensors')}
+        catalog = {'files': files, 'workflows': {'wf': ['text_encoders/' + models.FP4, 'vae/v.safetensors']}}
+        (bundle / 'autodl/models.json').write_text(json.dumps(catalog))
+        self.bundle = bundle
+        self.catalog = catalog
+        for patcher in (patch.object(setup, 'BUNDLE', bundle), patch.object(ranges, 'CHUNK', 1024),
+                        patch.object(setup, 'ensure_space', lambda *_: None)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_setup(self, **extra):
+        (self.bundle / 'recipe.json').write_text(json.dumps({'workflows': ['wf'], 'plugins': [], 'nodes': [], **extra}))
+        state = {'run': 'r'}
+        setup.execute(self.root, 8188, state)
+        return state
+
+    def test_gpu_less_boot_downloads_int8_and_stops_before_the_gpu_stages(self):
+        with patch.object(setup.subprocess, 'check_output', side_effect=FileNotFoundError) as smi, \
+             patch.object(setup, 'install_core', side_effect=AssertionError('no runtime install')):
+            state = self.run_setup(modelsOnly=True)
+        smi.assert_not_called()
+        self.assertEqual(state['status'], 'downloaded')
+        self.assertTrue(state['modelsOnly'])
+        self.assertEqual(json.loads((self.root / 'state.json').read_text())['status'], 'downloaded')
+        staged = self.root / 'models' / 'text_encoders'
+        self.assertEqual((staged / models.INT8).read_bytes(), self.content)
+        self.assertFalse((staged / models.FP4).exists())
+        self.assertFalse((self.root / 'ComfyUI').exists())
+
+        # The later paid GPU run keeps the INT8 encoder and trusts the recorded verification.
+        self.assertFalse(models.prefer_fp4(self.root / 'models', True))
+        files = models.inventory(self.catalog, ['wf'], False)
+        with patch.object(models, 'digest', side_effect=AssertionError('rehashed a verified file')):
+            needed, pending = models.plan(self.root / 'models', files, self.root / 'none', lambda _: None)
+        self.assertEqual((needed, pending), (0, []))
+
+    def test_changed_file_is_hashed_again(self):
+        dest = self.root / 'x.bin'
+        dest.write_bytes(self.content)
+        spec = {'bytes': len(self.content), 'sha256': hashlib.sha256(self.content).hexdigest()}
+        self.assertTrue(models.known_good(dest, spec))
+        dest.write_bytes(b'!' * len(self.content))
+        self.assertFalse(models.known_good(dest, spec))
+
+    def test_encoder_choice_without_a_staged_download(self):
+        self.assertTrue(models.prefer_fp4(self.root / 'models', True))
+        self.assertFalse(models.prefer_fp4(self.root / 'models', False))
+
+    def test_full_run_without_gpu_explains_the_gpu_less_option(self):
+        with patch.object(setup.subprocess, 'check_output', side_effect=FileNotFoundError):
+            with self.assertRaisesRegex(RuntimeError, '无卡模式'):
+                self.run_setup()

@@ -21,7 +21,7 @@ const PYTHON = 'if [ -x /root/miniconda3/bin/python ]; then py=/root/miniconda3/
 const remoteDir = (port) => `/root/autodl-tmp/blackbox/${port}`;
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
-function recipe(root, profile, upscale = false) {
+function recipe(root, profile, upscale = false, modelsOnly = false) {
   if (!Object.hasOwn(PROFILES, profile)) throw new Error('未知的 AutoDL 工作流');
   const videos = PROFILES[profile];
   const workflows = ['qwen-image-t2i', 'qwen-image-i2i', ...videos];
@@ -59,19 +59,20 @@ function recipe(root, profile, upscale = false) {
       if (node.class_type === 'SaveVideo') node.inputs.filename_prefix = 'video/' + STARTER;
     }
   }
-  return { workflows, nodes, plugins: [...plugins].sort(), image: image.workflow, video };
+  // modelsOnly: a GPU-less AutoDL boot only downloads and verifies the weights for these workflows.
+  return { workflows, nodes, plugins: [...plugins].sort(), image: image.workflow, video, ...(modelsOnly ? { modelsOnly: true } : {}) };
 }
 
 async function makeBundle(root, options) {
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'bbt-autodl-'));
   try {
-    const plan = recipe(root, options.profile, options.upscale);
+    const plan = recipe(root, options.profile, options.upscale, options.modelsOnly === true);
     const json = path.join(tmp, 'recipe.json');
     await fs.writeFile(json, JSON.stringify(plan));
     await fs.utimes(json, 0, 0);
     const archive = path.join(tmp, 'setup.tgz');
     await execFile('tar', ['-czf', archive, '--exclude=__pycache__', '--exclude=*.pyc', '-C', root,
-      'autodl', ...plan.plugins.map((name) => 'comfyui-plugins/' + name), '-C', tmp, 'recipe.json'],
+      'autodl', ...(plan.modelsOnly ? [] : plan.plugins.map((name) => 'comfyui-plugins/' + name)), '-C', tmp, 'recipe.json'],
     { windowsHide: true, env: { ...process.env, COPYFILE_DISABLE: '1' } });
     return await fs.readFile(archive);
   } finally {

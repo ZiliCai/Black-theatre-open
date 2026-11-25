@@ -16,6 +16,7 @@ export function CloudWelcome({ onRemote, onSkip }: { onRemote: () => void; onSki
   const [key, setKey] = useState('');
   const [keySaved, setKeySaved] = useState(false);
   const [profile, setProfile] = useState('wenwu');
+  const [modelsOnly, setModelsOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -44,7 +45,7 @@ export function CloudWelcome({ onRemote, onSkip }: { onRemote: () => void; onSki
     setError('');
     setSubmitting(true);
     try {
-      const result = api.cloudInstall({ login, password, apiKey: key, profile });
+      const result = api.cloudInstall({ login, password, apiKey: key, profile, modelsOnly });
       setPassword('');
       const response = await result;
       if (!response.ok) throw new Error(response.message);
@@ -74,8 +75,11 @@ export function CloudWelcome({ onRemote, onSkip }: { onRemote: () => void; onSki
     </section>
     <section className="card">
       <ProfileSelect value={profile} disabled={busy} change={setProfile} />
-      <p className="muted">点击后会在已租用的实例上安装环境和模型，生成验收素材，并向 DeepSeek 发送一次简短测试请求。GPU 运行和 API 调用分别按用量计费。</p>
-      <div className="actions"><Button type="submit" variant="primary" disabled={busy} id="welcome-install">{busy ? '正在配置…' : '一键配置并自检'}</Button>
+      <label><input type="checkbox" id="welcome-models-only" checked={modelsOnly} disabled={busy} onChange={(e) => setModelsOnly(e.target.checked)} /> 实例以无卡模式开机：先只下载模型</label>
+      <p className="muted">{modelsOnly
+        ? '模型约 66 GiB，下载可能要几个小时。无卡模式按低价计费，适合先把模型下完。下完后关机，改用有卡模式开机，再到「设置 → 远程 GPU」点「配置并验收」。'
+        : '点击后会在已租用的实例上安装环境和模型，生成验收素材，并向 DeepSeek 发送一次简短测试请求。GPU 运行和 API 调用分别按用量计费。'}</p>
+      <div className="actions"><Button type="submit" variant="primary" disabled={busy} id="welcome-install">{busy ? '正在配置…' : modelsOnly ? '连接并开始下载模型' : '一键配置并自检'}</Button>
         <Button disabled={busy} onClick={async () => { if (await api.cloudSkip()) onSkip(); }}>稍后配置</Button>
         {!busy && watching && <Button onClick={onRemote}>查看实例配置进度</Button>}</div>
       {busy && <div role="status">{message || '正在提交配置…'}<progress aria-label="连接并启动云端配置" /></div>}

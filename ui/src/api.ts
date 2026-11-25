@@ -139,7 +139,7 @@ export type RemoteServer = {
 export type Tunnel = { state: 'off' | 'connecting' | 'open' | 'down'; kind: string; message: string; port: number | null; serverId: string; since: number };
 export type DownloadStats = { total: number; saved: number; rate: number; updated: number };
 export type SetupReport = { at: number; ok: boolean; checks: { id: string; label: string; status: 'pass' | 'fail' | 'skip'; detail: string }[] };
-export type SetupState = { report?: SetupReport; historical?: boolean; phase?: string; video?: boolean; download?: DownloadStats; status: 'idle' | 'running' | 'ready' | 'done' | 'attention' | 'failed'; message: string; gpu?: string; space?: string; preview?: string };
+export type SetupState = { report?: SetupReport; historical?: boolean; phase?: string; video?: boolean; modelsOnly?: boolean; download?: DownloadStats; status: 'idle' | 'running' | 'ready' | 'downloaded' | 'done' | 'attention' | 'failed'; message: string; gpu?: string; space?: string; preview?: string };
 export type RemotePayload = { setupWatch?: { id: string; profile: string; upscale: boolean }; ok: true; target: string; servers: RemoteServer[]; tunnel: Tunnel };
 export type ServerTest = { ok: boolean; message?: string; steps: { label: string; ok: boolean; detail: string }[] };
 export type Alert = { title: string; sub: string; count?: number } | null;
@@ -160,8 +160,8 @@ type Bridge = {
   openUI: Fn<void, void>; openLog: Fn<void, void>;
   cloudInfo: Fn<void, { busy: boolean; message: string; watching: boolean; keySaved: boolean }>;
   cloudOpen: Fn<'instance' | 'deepseek', void>; cloudSkip: Fn<void, boolean>;
-  cloudInstall: Fn<{ login: string; password: string; apiKey: string; profile: string }, Result>;
-  autodlStart: Fn<{ id: string; profile: string; upscale: boolean }, Result>;
+  cloudInstall: Fn<{ login: string; password: string; apiKey: string; profile: string; modelsOnly: boolean }, Result>;
+  autodlStart: Fn<{ id: string; profile: string; upscale: boolean; modelsOnly: boolean }, Result>;
   autodlStatus: Fn<{ id: string; retest?: boolean }, SetupState>;
   remoteGet: Fn<void, RemotePayload>; remoteSave: Fn<RemoteServer, (RemotePayload & { saved: string }) | { ok: false; message: string }>;
   remoteDelete: Fn<{ id: string }, RemotePayload | { ok: false; message: string }>;

@@ -9,6 +9,7 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
   const [watch, setWatch] = useState(() => !!initial || localStorage.getItem(storageKey) === '1');
   const [profile, setProfile] = useState(initial?.profile || 'wenwu');
   const [upscale, setUpscale] = useState(initial?.upscale || false);
+  const [modelsOnly, setModelsOnly] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [state, setState] = useState<SetupState | null>(null);
   const [error, setError] = useState('');
@@ -24,7 +25,9 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
         if (!live) return;
         setState(next);
         setError('');
-        if (['done', 'attention', 'failed', 'idle'].includes(next.status)) return;
+        // The next run after a GPU-less download is the real acceptance.
+        if (next.status === 'downloaded') setModelsOnly(false);
+        if (['done', 'attention', 'failed', 'idle', 'downloaded'].includes(next.status)) return;
         timer = setTimeout(poll, next.phase === 'selfcheck' ? 2000 : 8000);
         return;
       } catch (e) {
@@ -51,9 +54,9 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
     localStorage.setItem(storageKey, '1');
     setWatch(true);
     try {
-      const result = await api.autodlStart({ id: server.id, profile, upscale });
+      const result = await api.autodlStart({ id: server.id, profile, upscale, modelsOnly });
       if (!result.ok) throw new Error(result.message);
-      setState({ status: 'running', message: '安装包已送达，正在读取云端进度…' });
+      setState({ status: 'running', modelsOnly, message: '安装包已送达，正在读取云端进度…' });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setState(null);
@@ -70,11 +73,13 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
     {watch && !state && !error && !uploading && <div role="status">正在读取云端进度…<progress aria-label="正在读取云端进度" /></div>}
     {state?.report && !uploading && <div className="actions"><Button id="btn-setup-retest" disabled={busy} variant={state.status === 'attention' ? 'primary' : 'default'} onClick={retest}>{retesting ? '正在复查…' : '重新自检'}</Button></div>}
     <p className="muted">环境和模型安装到实例的数据盘。云端会实际生成验收素材，选择视频工作流时还会取回约 4 秒的短片。已配置 DeepSeek 时，自检会发送一次简短测试请求，按 API 用量计费。实例用完请到 AutoDL 关机。</p>
+    <p className="muted">模型约 66 GiB，下载可能要几个小时。可以先在 AutoDL 控制台选「无卡模式开机」，勾选下面的「无卡模式」只下载模型（按低价计费）；下完关机、改用有卡模式开机，再取消勾选点「配置并验收」，已下载的模型会直接复用。</p>
     <ProfileSelect value={profile} disabled={busy} change={setProfile} />
     <label><input type="checkbox" checked={upscale} disabled={busy} onChange={(e) => setUpscale(e.target.checked)} /> 同时安装 SeedVR2 超分</label>
+    <label><input type="checkbox" id="autodl-models-only" checked={modelsOnly} disabled={busy} onChange={(e) => setModelsOnly(e.target.checked)} /> 无卡模式：只下载模型（不检查显卡，不生成验收素材）</label>
     <div className="actions">
       <Button id="btn-autodl-setup" variant="primary" disabled={busy} onClick={install}>
-        {uploading ? '正在上传安装包…' : busy ? '配置进行中…' : state?.status === 'failed' ? '重试配置并验收' : state?.report ? '重新配置并验收' : '配置并验收'}
+        {uploading ? '正在上传安装包…' : busy ? '配置进行中…' : modelsOnly ? '开始下载模型' : state?.status === 'failed' ? '重试配置并验收' : state?.report ? '重新配置并验收' : '配置并验收'}
       </Button>
       {!busy && <Button size="sm" onClick={() => { setWatch(true); setRound((n) => n + 1); }}>查看云端进度</Button>}
     </div>

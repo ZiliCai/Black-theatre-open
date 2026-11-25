@@ -8,12 +8,12 @@ const clock = (ms: number) => new Date(ms).toLocaleString('zh-CN', { month: 'num
 export function SetupProgress({ state, offline }: { state: SetupState; offline: boolean }) {
   const [reserve, setReserve] = useState('30');
   if (state.status === 'idle') return null;
-  const steps = [
+  const steps = state.modelsOnly ? [['check', '检查实例'], ['models', '下载并校验模型']] : [
     ['check', '检查实例'], ['environment', '安装环境与模型'], ['nodes', '检查工作流'],
     ['image', '生成验收图'], ...(state.video === false ? [] : [['video', '生成验收视频']]), ['transfer', '取回并校验'], ['selfcheck', '使用前自检'],
   ];
-  const completed = state.status === 'done';
-  const stage = steps.findIndex(([id]) => id === (state.phase === 'models' ? 'environment' : state.phase));
+  const completed = state.status === 'done' || state.status === 'downloaded';
+  const stage = steps.findIndex(([id]) => id === (state.phase === 'models' && !state.modelsOnly ? 'environment' : state.phase));
   const d = state.download;
   const percent = d && d.total > 0 ? Math.floor(100 * d.saved / d.total) : null;
   const now = Date.now();
@@ -23,7 +23,7 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
   const estimate = seconds === null ? null : now + seconds * 1000;
   const minutes = Number(reserve);
   return <div className="setup-progress">
-    <div className="welcome-heading"><strong>{state.historical ? '上次自检结果' : completed ? '自检通过' : state.status === 'attention' ? '自检需要处理' : stage < 0 ? '配置进度' : steps[stage][1]}</strong>
+    <div className="welcome-heading"><strong>{state.historical ? '上次自检结果' : state.status === 'downloaded' ? '模型已就绪' : completed ? '自检通过' : state.status === 'attention' ? '自检需要处理' : stage < 0 ? '配置进度' : steps[stage][1]}</strong>
       {(completed || stage >= 0) && <span className="muted">{completed ? '已完成全部阶段' : '阶段 ' + (stage + 1) + ' / ' + steps.length}</span>}</div>
     <progress aria-label="配置阶段完成进度" max={steps.length} value={completed ? steps.length : stage < 0 ? undefined : stage} />
     {percent !== null && d && <div>
@@ -42,11 +42,12 @@ export function SetupProgress({ state, offline }: { state: SetupState; offline: 
     </section>}
     {estimate !== null && <div className="shutdown-plan">
       <p>预计下载完成于 {clock(estimate)}（本机时间）</p>
-      <Field label="为剩余安装和验收预留（分钟）"><TextInput type="number" min="0" max="1440" step="1"
-        value={reserve} onChange={(e) => setReserve(e.target.value)} /></Field>
-      {reserve && Number.isInteger(minutes) && minutes >= 0 && minutes <= 1440 && <p>关机预设参考时间：{clock(estimate + minutes * 60000)}（含预留）。请在控制台确认。</p>}
+      {!state.modelsOnly && <Field label="为剩余安装和验收预留（分钟）"><TextInput type="number" min="0" max="1440" step="1"
+        value={reserve} onChange={(e) => setReserve(e.target.value)} /></Field>}
+      {!state.modelsOnly && reserve && Number.isInteger(minutes) && minutes >= 0 && minutes <= 1440 && <p>关机预设参考时间：{clock(estimate + minutes * 60000)}（含预留）。请在控制台确认。</p>}
     </div>}
-    <p className="muted">{completed ? '选择或新建剧本项目后，可到「素材」出图。' + (state.video ? '在「镜头」可使用所选视频工作流出片。' : '') + '使用云端生成时请保持实例开机。' :
+    <p className="muted">{state.status === 'downloaded' ? '无卡模式只负责下载。关机后在控制台选择有卡模式开机，回到这里取消勾选「无卡模式」再点「配置并验收」，已下载的模型会直接复用，不再重复校验。' :
+      completed ? '选择或新建剧本项目后，可到「素材」出图。' + (state.video ? '在「镜头」可使用所选视频工作流出片。' : '') + '使用云端生成时请保持实例开机。' :
       state.status === 'attention' ? '修复提示中的问题后，点击「重新自检」即可复查。' :
       offline ? '正在重新连接。恢复进度更新后会重新估算下载时间。' :
       state.status === 'failed' ? '云端配置已中断，可以重试或到控制台关机。' :
