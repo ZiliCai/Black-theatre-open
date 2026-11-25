@@ -3,6 +3,7 @@ import { api, type RemotePayload, type RemoteServer, type ServerTest } from '../
 import { Button, Field, Icon, TextArea, TextInput, useToast } from '../../components';
 import { useDialog } from '../../components/dialog';
 import { AutoDLSetup } from './AutoDLSetup';
+import { Onboarding } from './Onboarding';
 import { useApp } from '../../shell/context';
 
 const BLANK: RemoteServer = {
@@ -22,7 +23,7 @@ const textToSwaps = (text: string) => {
 
 const TUNNEL: Record<string, string> = { off: '', connecting: '正在连接…', open: '已连上', down: '连不上' };
 
-// Remote GPU servers: render on a school or rented GPU over SSH instead of this computer.
+// Remote GPU servers: render on a rented GPU over SSH instead of this computer.
 export function RemoteTab() {
   const { status } = useApp();
   const toast = useToast();
@@ -31,6 +32,7 @@ export function RemoteTab() {
   const [editing, setEditing] = useState<(RemoteServer & { swapsText: string }) | null>(null);
   const [test, setTest] = useState<ServerTest | null>(null);
   const [testing, setTesting] = useState(false);
+  const [adding, setAdding] = useState(false);
 
   const load = async () => setData(await api.remoteGet());
   useEffect(() => { load(); }, [status?.tunnel?.state]);
@@ -62,62 +64,65 @@ export function RemoteTab() {
   if (!data) return <div className="set-inner" />;
   const t = data.tunnel;
   const selected = data.servers.find((s) => s.id === data.target);
+  const local = data.target === 'local';
   return (
     <div className="set-inner" id="tab-remote">
       <h2>远程 GPU</h2>
-      <p className="lead">
-        把出片放到租的云 GPU 服务器（比如 AutoDL）上跑：剧本、素材和成片都还在这台电脑的项目里，出片前自动把参考图传上去，出完把视频和接续文件取回来。
-        连接使用 SSH 密钥。第一次使用 AutoDL，可以从「首次云端配置」粘贴登录指令和实例密码。
-      </p>
+      <p className="lead">选择在哪台机器上生成画面。剧本、素材和成片始终保存在这台电脑，出片时自动上传参考图、取回结果。</p>
 
-      {selected && <AutoDLSetup key={JSON.stringify([selected.id, selected.host, selected.port, selected.user, selected.comfyPort])}
-        server={selected} initial={data.setupWatch?.id === selected.id ? data.setupWatch : undefined} />}
-
-      <article className={`proj-card ${data.target === 'local' ? 'active' : ''}`}>
-        <h3>本机{data.target === 'local' ? <span className="tag acc">正在使用</span> : null}</h3>
-        <div className="muted">用这台电脑上的 ComfyUI 出片。</div>
-        <div className="actions">
-          <Button size="sm" id="btn-remote-local" variant={data.target === 'local' ? 'default' : 'primary'} disabled={data.target === 'local'} onClick={() => use('local')}>
-            {data.target === 'local' ? '正在使用' : '改回本机出片'}
-          </Button>
-        </div>
-      </article>
-
-      {data.servers.map((s) => {
-        const active = data.target === s.id;
-        return (
-          <article key={s.id} className={`proj-card ${active ? 'active' : ''}`} data-server={s.id}>
-            <h3>
-              {s.name}
-              {active ? <span className="tag acc">正在使用</span> : null}
-              {active && TUNNEL[t.state] ? <span className={`tag ${t.state === 'open' ? 'ok' : t.state === 'down' ? 'bad' : ''}`}>{TUNNEL[t.state]}</span> : null}
-            </h3>
-            <div className="path">{s.user}@{s.host}:{s.port} · ComfyUI 端口 {s.comfyPort}</div>
-            {active && t.state === 'down' && t.message ? <div className="muted" style={{ color: 'var(--bad)' }}>{t.message}</div> : null}
-            {active && status?.remote && status.state === 'running' && status.deviceName ? <div className="muted">{status.deviceName}</div> : null}
-            <div className="actions">
-              <Button size="sm" variant={active ? 'default' : 'primary'} disabled={active} onClick={() => use(s.id)}>{active ? '正在使用' : '在这台上出片'}</Button>
-              {active && t.state === 'down' ? <Button size="sm" onClick={async () => setData(await api.remoteRetry())}><Icon name="refresh" />重新连接</Button> : null}
-              {active && status?.state === 'remote-stopped' ? <Button size="sm" onClick={async () => {
-                toast('正在启动服务器上的 ComfyUI…');
-                const r = await api.start();
-                toast(r.message || '', { tone: r.ok ? 'ok' : 'bad' });
-              }}><Icon name="play" />启动服务器上的 ComfyUI</Button> : null}
-              <Button size="sm" onClick={() => edit(s)}>修改</Button>
-              <Button size="sm" variant="ghost" onClick={async () => {
-                if (!(await confirm({ title: '删除服务器', message: `删除「${s.name}」这套设置？`, detail: '只删软件里的设置，服务器上的文件不动。', okLabel: '删除' }))) return;
-                const r = await api.remoteDelete({ id: s.id });
-                if (!r.ok) { toast(r.message, { tone: 'bad' }); return; }
-                setData(r);
-              }}>删除</Button>
+      <section className="card" aria-label="出片位置">
+        <h3>出片位置</h3>
+        <ul className="target-list">
+          <li className={local ? 'on' : ''}>
+            <div className="t-main">
+              <strong>本机</strong>
+              <span className="muted">这台电脑上的 ComfyUI</span>
             </div>
-          </article>
-        );
-      })}
-
-      <div className="row" style={{ display: 'flex', gap: 8 }}>
-        <Button id="btn-remote-add" onClick={() => edit(BLANK)}><Icon name="plus" />添加服务器</Button>
-      </div>
+            <div className="t-side">
+              {local ? <span className="tag acc">正在使用</span>
+                : <Button size="sm" id="btn-remote-local" onClick={() => use('local')}>改用本机</Button>}
+            </div>
+          </li>
+          {data.servers.map((s) => {
+            const active = data.target === s.id;
+            return (
+              <li key={s.id} className={active ? 'on' : ''} data-server={s.id}>
+                <div className="t-main">
+                  <strong>
+                    {s.name}
+                    {active && TUNNEL[t.state] ? <span className={`tag ${t.state === 'open' ? 'ok' : t.state === 'down' ? 'bad' : ''}`}>{TUNNEL[t.state]}</span> : null}
+                  </strong>
+                  <span className="muted path">{s.user}@{s.host}:{s.port} · ComfyUI 端口 {s.comfyPort}
+                    {active && status?.remote && status.state === 'running' && status.deviceName ? ` · ${status.deviceName}` : ''}</span>
+                  {active && t.state === 'down' && t.message ? <span className="t-error">{t.message}</span> : null}
+                  {active && (t.state === 'down' || status?.state === 'remote-stopped') ? <div className="t-actions">
+                    {t.state === 'down' ? <Button size="sm" onClick={async () => setData(await api.remoteRetry())}><Icon name="refresh" />重新连接</Button> : null}
+                    {status?.state === 'remote-stopped' ? <Button size="sm" onClick={async () => {
+                      toast('正在启动服务器上的 ComfyUI…');
+                      const r = await api.start();
+                      toast(r.message || '', { tone: r.ok ? 'ok' : 'bad' });
+                    }}><Icon name="play" />启动服务器上的 ComfyUI</Button> : null}
+                  </div> : null}
+                </div>
+                <div className="t-side">
+                  {active ? <span className="tag acc">正在使用</span> : <Button size="sm" onClick={() => use(s.id)}>在这台上出片</Button>}
+                  <Button size="sm" variant="ghost" onClick={() => edit(s)}>修改</Button>
+                  <Button size="sm" variant="ghost" onClick={async () => {
+                    if (!(await confirm({ title: '删除服务器', message: `删除「${s.name}」这套设置？`, detail: '只删软件里的设置，服务器上的文件不动。', okLabel: '删除' }))) return;
+                    const r = await api.remoteDelete({ id: s.id });
+                    if (!r.ok) { toast(r.message, { tone: 'bad' }); return; }
+                    setData(r);
+                  }}>删除</Button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+        <div className="row">
+          <Button variant="primary" id="btn-autodl-add" onClick={() => setAdding(true)}><Icon name="plus" />连接 AutoDL 实例</Button>
+          <Button variant="ghost" id="btn-remote-add" onClick={() => edit(BLANK)}>手动添加 SSH 服务器</Button>
+        </div>
+      </section>
 
       {editing ? (
         <div className="card" id="remote-form">
@@ -151,6 +156,11 @@ export function RemoteTab() {
           </div>
         </div>
       ) : null}
+
+      {selected && <AutoDLSetup key={JSON.stringify([selected.id, selected.host, selected.port, selected.user, selected.comfyPort])}
+        server={selected} initial={data.setupWatch?.id === selected.id ? data.setupWatch : undefined} />}
+
+      {adding && <Onboarding mode="add" onClose={() => { setAdding(false); void load(); }} />}
     </div>
   );
 }

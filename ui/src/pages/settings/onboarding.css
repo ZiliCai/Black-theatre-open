@@ -1,0 +1,38 @@
+/* First-run setup: full window after installation, or an overlay from 远程 GPU. */
+/* Anchored near the top so the panel does not jump between steps of different height. */
+.onboard { display: grid; justify-items: center; align-content: start; padding: max(var(--s6), 10vh) var(--s6) var(--s6); }
+.onboard.full { position: fixed; inset: 0; background: var(--bg); z-index: 40; overflow: auto; }
+.onboard.overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); z-index: 50; }
+.ob-panel { width: min(640px, 100%); max-height: calc(100vh - 2 * var(--s6)); display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.ob-top { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--line); }
+.ob-steps { list-style: none; display: flex; gap: var(--s4); margin: 0; padding: 0; flex-wrap: wrap; }
+.ob-steps li { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: var(--fs-sm); }
+.ob-steps .n { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line);
+  font-size: var(--fs-xs); }
+.ob-steps li.on { color: var(--text); }
+.ob-steps li.on .n { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); font-weight: 600; }
+.ob-steps li.done { color: var(--sub); }
+.ob-steps li.done .n { border-color: var(--good); color: var(--good); }
+.ob-body { padding: var(--s6) var(--s6) var(--s5); display: flex; flex-direction: column; gap: var(--s4); overflow: auto; }
+.ob-body h1 { font-size: var(--fs-xl); font-weight: 700; margin: 0; }
+.ob-body .lead { color: var(--sub); font-size: var(--fs-md); line-height: 1.7; margin: -6px 0 0; }
+.ob-body .ob-link { align-self: flex-start; }
+.ob-choices { display: grid; gap: var(--s3); }
+.ob-choice { text-align: left; display: flex; flex-direction: column; gap: 6px; padding: var(--s4) var(--s5);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px; color: var(--sub); font-size: var(--fs-sm); line-height: 1.6; }
+.ob-choice:hover { border-color: var(--acc); }
+.ob-choice strong { color: var(--text); font-size: var(--fs-md); display: flex; align-items: center; gap: var(--s2); }
+.ob-check { margin-top: var(--s1); }
+.ob-hint { color: var(--dim); font-size: var(--fs-sm); line-height: 1.6; margin: -6px 0 0; }
+.ob-warn { color: var(--acc); font-size: var(--fs-sm); margin: -6px 0 0; }
+.ob-summary { display: grid; grid-template-columns: 80px 1fr; gap: 6px var(--s3); margin: 0; padding: var(--s3) var(--s4);
+  background: var(--bg); border-radius: var(--r3); font-size: var(--fs-sm); }
+.ob-summary dt { color: var(--dim); }
+.ob-summary dd { margin: 0; word-break: break-all; }
+.ob-busy { display: grid; gap: 6px; color: var(--sub); font-size: var(--fs-sm); }
+.ob-busy progress { width: 100%; height: 6px; accent-color: var(--acc); }
+.ob-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); padding: var(--s3) var(--s5);
+  border-top: 1px solid var(--line); }
+.ob-foot-right { display: flex; gap: var(--s2); }

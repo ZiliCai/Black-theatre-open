@@ -6,7 +6,6 @@ import { ProjectsTab } from './ProjectsTab';
 import { DirsTab } from './DirsTab';
 import { ModelsTab } from './ModelsTab';
 import { GeneralTab } from './GeneralTab';
-import { CloudWelcome } from './CloudWelcome';
 import { RemoteTab } from './RemoteTab';
 import './settings.css';
 
@@ -17,7 +16,6 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'models', label: '模型' },
   { id: 'run', label: '运行' },
   { id: 'remote', label: '远程 GPU' },
-  { id: 'welcome', label: '首次云端配置' },
 ];
 
 export function SettingsPage() {
@@ -36,7 +34,7 @@ export function SettingsPage() {
         ))}
       </nav>
       <div className="set-body">
-        {tab === 'welcome' ? <CloudWelcome onRemote={() => setTab('remote')} onSkip={() => setTab('general')} /> : tab === 'run' ? <RunTab /> : tab === 'remote' ? <RemoteTab /> : tab === 'projects' ? <ProjectsTab /> : tab === 'dirs' ? <DirsTab />
+        {tab === 'run' ? <RunTab /> : tab === 'remote' ? <RemoteTab /> : tab === 'projects' ? <ProjectsTab /> : tab === 'dirs' ? <DirsTab />
           : tab === 'models' ? <ModelsTab /> : <GeneralTab onValidation={setConfigErrors} />}
       </div>
     </div>

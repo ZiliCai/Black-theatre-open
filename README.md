@@ -28,7 +28,7 @@
 
 ### Windows 独立安装包
 
-从[最新发布页](https://github.com/ZiliCai/Black-theatre-open/releases/latest)下载 `BlackBox-Theater-Setup-<版本>-x64.exe`，双击安装。安装程序会安装到当前用户，并创建桌面和开始菜单快捷方式。安装结束后软件自动打开。新用户会看到「首次云端配置」，可在向导里连接 AutoDL 和 DeepSeek，详见[云端配置说明](docs/AutoDL配置.md)。选择「稍后配置」后，可从「设置 → 首次云端配置」再次打开向导。整套模型约 66 GiB，可以先让实例以 AutoDL「无卡模式」开机，只下载模型，再换有卡模式验收，详见[先用无卡模式下载模型](docs/AutoDL配置.md#先用无卡模式下载模型省钱)。
+从[最新发布页](https://github.com/ZiliCai/Black-theatre-open/releases/latest)下载 `BlackBox-Theater-Setup-<版本>-x64.exe`，双击安装。安装程序会安装到当前用户，并创建桌面和开始菜单快捷方式。安装结束后软件自动打开。第一次打开会进入配置向导，可以连接 AutoDL 和 DeepSeek，也可以选择用本机显卡，详见[云端配置说明](docs/AutoDL配置.md)。选择「稍后再说」后，可在「设置 → 远程 GPU」点「连接 AutoDL 实例」重新打开向导。整套模型约 66 GiB，可以先让实例以 AutoDL「无卡模式」开机，只下载模型，再换有卡模式验收，详见[先用无卡模式下载模型](docs/AutoDL配置.md#先用无卡模式下载模型省钱)。
 
 云端模型在一键配置时下载到自己的 GPU 实例。希望在本机出片的用户，可在向导里选择「稍后配置」，准备 ComfyUI 便携版，按 [插件说明](comfyui-plugins/) 和 [模型说明](docs/模型下载.md) 安装，然后在「设置 → 常规」选择便携版文件夹。
 

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { Loose, QueueSnapshot, Status } from '../api';
 
 export type PageId = 'shots' | 'script' | 'scene' | 'gallery' | 'assets' | 'settings';
-export type SettingsTab = 'welcome' | 'run' | 'remote' | 'projects' | 'dirs' | 'models' | 'general';
+export type SettingsTab = 'run' | 'remote' | 'projects' | 'dirs' | 'models' | 'general';
 
 export type AppState = {
   status: Status | null;

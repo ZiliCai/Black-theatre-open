@@ -10,6 +10,7 @@ import { ShotsPage } from './pages/shots/ShotsPage';
 import { GalleryPage } from './pages/gallery/GalleryPage';
 import { ScriptPage } from './pages/script/ScriptPage';
 import { SettingsPage } from './pages/settings/SettingsPage';
+import { Onboarding, type OnboardingExit } from './pages/settings/Onboarding';
 import './shell/shell.css';
 
 const ScenePage = lazy(() => import('./pages/scene/ScenePage').then(({ ScenePage }) => ({ default: ScenePage })));
@@ -44,6 +45,7 @@ export function App() {
   const [initializing, setInitializing] = useState(true);
   const [page, setPage] = useState<PageId>(readPage);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('general');
+  const [onboarding, setOnboarding] = useState(false);
   const [status, setStatus] = useState<Status | null>(null);
   const [queue, setQueue] = useState<QueueSnapshot>(EMPTY_QUEUE);
   const [projects, setProjects] = useState<Loose[]>([]);
@@ -63,9 +65,12 @@ export function App() {
     api.queueSnapshot().then(setQueue);
     // a setting that keeps ComfyUI from starting is the first thing to see
     api.getConfig().then((r) => {
-      if (r.config.cloudWelcome === 'pending' || (r.config.cloudWelcome === 'watch' && r.config.target === r.config.setupWatch?.id)) {
+      // A fresh installation opens the setup steps before the workspace.
+      if (r.config.cloudWelcome === 'pending') {
+        setOnboarding(true);
+      } else if (r.config.cloudWelcome === 'watch' && r.config.target === r.config.setupWatch?.id) {
         setPage('settings');
-        setSettingsTab(r.config.cloudWelcome === 'pending' ? 'welcome' : 'remote');
+        setSettingsTab('remote');
       } else if (!r.validation.ok && r.config.target === 'local') {
         setPage('settings');
         setSettingsTab('general');
@@ -99,7 +104,13 @@ export function App() {
     if (crumb) setCrumbSlot(crumb);
   }, []);
 
+  const leaveOnboarding = useCallback((to: OnboardingExit) => {
+    setOnboarding(false);
+    if (to) { setPage('settings'); setSettingsTab(to); }
+  }, []);
+
   if (initializing) return null;
+  if (onboarding) return <Onboarding mode="first-run" onClose={leaveOnboarding} />;
   return (
     <AppContext.Provider value={state}>
       <div className="app">

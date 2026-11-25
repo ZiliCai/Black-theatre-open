@@ -1,8 +1,22 @@
 import { useEffect, useState } from 'react';
 import { api, mediaUrl, type SetupState, type RemoteServer } from '../../api';
 import { SetupProgress } from './SetupProgress';
-import { ProfileSelect } from './CloudWelcome';
-import { Button } from '../../components';
+import { ProfileSelect } from './Onboarding';
+import { Button, Pill } from '../../components';
+
+// One word for where the cloud installation stands, next to the card title.
+function summary(state: SetupState | null, watching: boolean): { tone: 'ok' | 'warn' | 'bad' | 'muted'; text: string } {
+  if (!state) return watching ? { tone: 'muted', text: '读取中' } : { tone: 'muted', text: '未配置' };
+  if (state.historical) return { tone: 'muted', text: '离线' };
+  switch (state.status) {
+    case 'done': return { tone: 'ok', text: '可以使用' };
+    case 'downloaded': return { tone: 'ok', text: '模型已就绪' };
+    case 'attention': return { tone: 'warn', text: '需要处理' };
+    case 'failed': return { tone: 'bad', text: '已中断' };
+    case 'idle': return { tone: 'muted', text: '未配置' };
+    default: return { tone: 'warn', text: state.phase === 'models' && state.download ? '下载模型中' : '配置中' };
+  }
+}
 
 export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial?: { profile: string; upscale: boolean } }) {
   const storageKey = 'autodl-setup:' + JSON.stringify([server.id, server.host, server.port, server.user, server.comfyPort]);
@@ -15,6 +29,7 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
   const [error, setError] = useState('');
   const [round, setRound] = useState(0);
   const [retesting, setRetesting] = useState(false);
+  const [optionsToggled, setOptionsToggled] = useState<boolean | null>(null);
   useEffect(() => {
     if (!watch || uploading || retesting) return;
     let live = true;
@@ -51,6 +66,7 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
   async function install() {
     setUploading(true);
     setError('');
+    setOptionsToggled(false);
     localStorage.setItem(storageKey, '1');
     setWatch(true);
     try {
@@ -61,34 +77,47 @@ export function AutoDLSetup({ server, initial }: { server: RemoteServer; initial
       setError(e instanceof Error ? e.message : String(e));
       setState(null);
       setWatch(false);
+      setOptionsToggled(true);
     } finally {
       setUploading(false);
       setRound((n) => n + 1);
     }
   }
   const busy = retesting || uploading || (watch && !state && !error) || state?.status === 'running' || state?.status === 'ready';
-  return <section className="card">
-    <div className="welcome-heading"><h3>AutoDL 一键配置</h3><span className="muted">{server.name}</span></div>
-    {state && !uploading && <SetupProgress state={state} offline={!!error} />}
-    {watch && !state && !error && !uploading && <div role="status">正在读取云端进度…<progress aria-label="正在读取云端进度" /></div>}
-    {state?.report && !uploading && <div className="actions"><Button id="btn-setup-retest" disabled={busy} variant={state.status === 'attention' ? 'primary' : 'default'} onClick={retest}>{retesting ? '正在复查…' : '重新自检'}</Button></div>}
-    <p className="muted">环境和模型安装到实例的数据盘。云端会实际生成验收素材，选择视频工作流时还会取回约 4 秒的短片。已配置 DeepSeek 时，自检会发送一次简短测试请求，按 API 用量计费。实例用完请到 AutoDL 关机。</p>
-    <p className="muted">模型约 66 GiB，下载可能要几个小时。可以先在 AutoDL 控制台选「无卡模式开机」，勾选下面的「无卡模式」只下载模型（按低价计费）；下完关机、改用有卡模式开机，再取消勾选点「配置并验收」，已下载的模型会直接复用。</p>
-    <ProfileSelect value={profile} disabled={busy} change={setProfile} />
-    <label><input type="checkbox" checked={upscale} disabled={busy} onChange={(e) => setUpscale(e.target.checked)} /> 同时安装 SeedVR2 超分</label>
-    <label><input type="checkbox" id="autodl-models-only" checked={modelsOnly} disabled={busy} onChange={(e) => setModelsOnly(e.target.checked)} /> 无卡模式：只下载模型（不检查显卡，不生成验收素材）</label>
-    <div className="actions">
-      <Button id="btn-autodl-setup" variant="primary" disabled={busy} onClick={install}>
-        {uploading ? '正在上传安装包…' : busy ? '配置进行中…' : modelsOnly ? '开始下载模型' : state?.status === 'failed' ? '重试配置并验收' : state?.report ? '重新配置并验收' : '配置并验收'}
-      </Button>
-      {!busy && <Button size="sm" onClick={() => { setWatch(true); setRound((n) => n + 1); }}>查看云端进度</Button>}
+  const started = !!state && state.status !== 'idle';
+  // Options stay folded once an installation exists; the progress and its result come first.
+  const optionsOpen = optionsToggled ?? !started;
+  const badge = summary(state, watch);
+  const startLabel = uploading ? '正在上传安装包…' : busy ? '配置进行中…' : modelsOnly ? '开始下载模型'
+    : state?.status === 'failed' ? '重试配置并验收' : started ? '重新配置并验收' : '配置并验收';
+  return <section className="card setup-card" id="autodl-setup" data-profile={profile}>
+    <div className="welcome-heading">
+      <h3>云端配置</h3>
+      <Pill tone={badge.tone}>{badge.text}</Pill>
     </div>
-    {uploading && <progress aria-label="正在上传安装包" />}
-    {state?.gpu && <p className="muted">{state.gpu}</p>}
-    {state?.space && <p className="muted">{state.space}</p>}
+    {!started && !uploading && !(watch && !error) && <p className="muted">在这台实例的数据盘上安装出片环境和模型，并实际生成验收素材。</p>}
+    {watch && !state && !error && !uploading && <div role="status" className="muted">正在读取云端进度…<progress aria-label="正在读取云端进度" /></div>}
+    {uploading && <div role="status" className="muted">正在上传安装包…<progress aria-label="正在上传安装包" /></div>}
+    {state && !uploading && <SetupProgress state={state} offline={!!error} />}
     {error && <div role="status" className="errors">{error}</div>}
     {state?.preview && (state.preview.endsWith('.mp4')
-      ? <video controls preload="metadata" style={{ maxWidth: '100%', maxHeight: 320 }} src={mediaUrl('autodl', state.preview)} />
-      : <img alt="AutoDL 验收图" style={{ maxWidth: '100%', maxHeight: 320 }} src={mediaUrl('autodl', state.preview)} />)}
+      ? <video controls preload="metadata" className="setup-preview" src={mediaUrl('autodl', state.preview)} />
+      : <img alt="AutoDL 验收图" className="setup-preview" src={mediaUrl('autodl', state.preview)} />)}
+    {(state?.gpu || state?.space) && <p className="muted setup-facts">{[state.gpu, state.space].filter(Boolean).join(' · ')}</p>}
+    <div className="row">
+      {state?.report && !uploading && <Button size="sm" id="btn-setup-retest" disabled={busy} variant={state.status === 'attention' ? 'primary' : 'default'} onClick={retest}>{retesting ? '正在复查…' : '重新自检'}</Button>}
+      {started && <Button size="sm" variant="ghost" id="btn-setup-options" aria-expanded={optionsOpen} onClick={() => setOptionsToggled(!optionsOpen)}>
+        {optionsOpen ? '收起配置选项' : '重新配置…'}</Button>}
+      {!busy && watch && <Button size="sm" variant="ghost" onClick={() => setRound((n) => n + 1)}>刷新进度</Button>}
+    </div>
+    <div className="setup-options" hidden={!optionsOpen}>
+      <ProfileSelect value={profile} disabled={busy} change={setProfile} />
+      <label className="check"><input type="checkbox" checked={upscale} disabled={busy} onChange={(e) => setUpscale(e.target.checked)} /> 同时安装 SeedVR2 超分</label>
+      <label className="check"><input type="checkbox" id="autodl-models-only" checked={modelsOnly} disabled={busy} onChange={(e) => setModelsOnly(e.target.checked)} /> 无卡模式：只下载模型</label>
+      <p className="muted">{modelsOnly
+        ? '实例以「无卡模式」开机时使用：只下载并校验模型，按低价计费。下完换有卡模式开机，再取消勾选点「配置并验收」。'
+        : '模型约 66 GiB。会实际生成一张图和约 4 秒短片，并向 DeepSeek 发送一次简短测试请求。'}</p>
+      <div><Button id="btn-autodl-setup" variant="primary" disabled={busy} onClick={install}>{startLabel}</Button></div>
+    </div>
   </section>;
 }
